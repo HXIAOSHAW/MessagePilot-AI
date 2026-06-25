@@ -89,6 +89,12 @@ CREATE TABLE IF NOT EXISTS complaints (
   severity TEXT NOT NULL DEFAULT 'low' CHECK (severity IN ('low', 'medium', 'high')),
   safe_reply TEXT NOT NULL,
   requires_escalation BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Populated by the agentic (Manus) complaint workflow:
+  risk_flags JSONB NOT NULL DEFAULT '[]',
+  proposed_resolution TEXT,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'auto_resolved', 'escalated', 'closed')),
+  photo_url TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -125,6 +131,8 @@ CREATE TABLE IF NOT EXISTS agent_logs (
   intent TEXT NOT NULL,
   confidence NUMERIC(4, 2),
   agent TEXT NOT NULL,
+  router_reason TEXT,
+  safety_flags JSONB NOT NULL DEFAULT '[]',
   duration_ms INTEGER NOT NULL,
   success BOOLEAN NOT NULL DEFAULT TRUE,
   error TEXT,
@@ -133,6 +141,24 @@ CREATE TABLE IF NOT EXISTS agent_logs (
 
 CREATE INDEX IF NOT EXISTS agent_logs_business_id_idx ON agent_logs(business_id);
 CREATE INDEX IF NOT EXISTS agent_logs_created_at_idx ON agent_logs(created_at);
+
+-- ─── Events (per-decision agent activity feed) ────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  level TEXT NOT NULL DEFAULT 'info' CHECK (level IN ('info', 'warn', 'action')),
+  ref TEXT,
+  business_id TEXT,
+  conversation_id TEXT,
+  customer_phone TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS events_created_at_idx ON events(created_at);
+CREATE INDEX IF NOT EXISTS events_business_id_idx ON events(business_id);
 
 -- ─── Row Level Security (RLS) ─────────────────────────────────────────────────
 -- Enable RLS on all tables. Policies below allow the service role full access.
@@ -143,6 +169,7 @@ ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE complaints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE owner_tasks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 
 -- Service role bypass (backend uses service role key)
 CREATE POLICY "service_role_all" ON businesses FOR ALL USING (auth.role() = 'service_role');
@@ -151,3 +178,4 @@ CREATE POLICY "service_role_all" ON orders FOR ALL USING (auth.role() = 'service
 CREATE POLICY "service_role_all" ON complaints FOR ALL USING (auth.role() = 'service_role');
 CREATE POLICY "service_role_all" ON owner_tasks FOR ALL USING (auth.role() = 'service_role');
 CREATE POLICY "service_role_all" ON agent_logs FOR ALL USING (auth.role() = 'service_role');
+CREATE POLICY "service_role_all" ON events FOR ALL USING (auth.role() = 'service_role');

@@ -16,6 +16,8 @@ export type OrderStatus =
 
 export type ComplaintSeverity = "low" | "medium" | "high";
 
+export type ComplaintStatus = "open" | "auto_resolved" | "escalated" | "closed";
+
 export type TaskStatus = "open" | "in_progress" | "resolved";
 
 // ─── Inbound message ─────────────────────────────────────────────────────────
@@ -129,6 +131,11 @@ export interface ComplaintCase {
   safe_reply: string;
   requires_escalation: boolean;
   created_at: string;
+  // ── Populated by the agentic (Claude tool-use) complaint workflow ──
+  risk_flags?: string[];
+  proposed_resolution?: string;
+  status?: ComplaintStatus;
+  photo_url?: string | null;
 }
 
 // ─── Owner task ───────────────────────────────────────────────────────────────

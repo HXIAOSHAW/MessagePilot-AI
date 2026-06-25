@@ -1,39 +1,37 @@
-import type { ManusAnalysisResult } from "../types";
-import type { ManusAdapter } from "../adapters/manusAdapter";
-import { MockManusAdapter } from "../adapters/mockManusAdapter";
-
 /**
- * Manus AI Service — Main Reasoning Agent
+ * Manus AI Service
  *
- * Manus acts as the primary intelligence layer in the MessagePilot AI pipeline:
- *   - Intent classification (order / complaint / product_question / …)
- *   - Sentiment & severity analysis for complaints
- *   - Draft reply generation
+ * Two integration points:
  *
- * The Backend Safety Agent ALWAYS runs after Manus and has final authority.
- * No order is created, no checkout is issued, without Safety clearance.
+ * 1. Complaint agent reasoning — `runManusComplaint(ctx, order)`
+ *    Sends the complaint + order context to Manus v2 and gets back a
+ *    structured decision (severity / action / reply). Falls back to a
+ *    deterministic flow when the key is missing or the task times out.
+ *    Backend guardrails always re-validate before any refund/escalation.
  *
- * MANUS_MODE=mock (default)
- *   Local Router Agent handles intent; keyword heuristics handle sentiment.
- *   Safe for demos — no external credentials required.
+ * 2. Route-level intent classification — `getManusAdapter()`
+ *    MANUS_MODE=external → calls real Manus for intent + order extraction.
+ *    MANUS_MODE=mock (default) → returns null; route uses local Router Agent.
+ *    Fallback to Router Agent on any external failure (manus_fallback=true).
  *
- * MANUS_MODE=external + MANUS_ENDPOINT set
- *   Calls teammate Manus endpoint. If it fails, falls back to mock and sets
- *   manus_fallback=true in the response.
- *
- * Teammate contract: see apps/backend/src/adapters/manusAdapter.ts
+ * API docs: https://open.manus.ai/docs/v2
  */
 
-// ─── Manus adapter factory ─────────────────────────────────────────────────────
+import type { AgentContext, DraftOrder, Product } from "@orderpilot/shared";
+import { AUTO_REFUND_MAX_GBP, EMPTY_EXTRACTED_ORDER } from "@orderpilot/shared";
+import { config, hasManusKey } from "../config";
+import type { ManusComplaintDecision } from "../types";
+import type { ManusAdapter, ManusDecision, ManusMessageContext } from "../adapters/manusAdapter";
+import { MockManusAdapter } from "../adapters/mockManusAdapter";
+import type { ExtractedOrder } from "@orderpilot/shared";
 
-let _adapter: ManusAdapter | null | undefined = undefined; // undefined = not yet resolved
+// ─── Route-level Manus adapter factory ────────────────────────────────────────
+
+let _adapter: ManusAdapter | null | undefined = undefined;
 
 /**
- * Returns the configured ManusAdapter, or null when MANUS_MODE=mock
- * (null means the route uses the local Router Agent directly — behaviour unchanged).
- *
- * MANUS_MODE=external requires MANUS_ENDPOINT to be set.
- * If MANUS_ENDPOINT is missing in external mode, falls back to mock with a warning.
+ * Returns ManusAdapter for route-level intent classification, or null when
+ * MANUS_MODE=mock (route uses local Router Agent directly).
  */
 export function getManusAdapter(): ManusAdapter | null {
   if (_adapter !== undefined) return _adapter;
@@ -41,222 +39,275 @@ export function getManusAdapter(): ManusAdapter | null {
   const mode = process.env.MANUS_MODE ?? "mock";
 
   if (mode === "external") {
-    const apiKey = process.env.MANUS_API_KEY ?? "";
+    const apiKey = config.MANUS_API_KEY;
     if (!apiKey) {
       console.warn("[ManusService] MANUS_MODE=external but MANUS_API_KEY is not set — using mock");
       _adapter = null;
       return null;
     }
-    const baseUrl = process.env.MANUS_ENDPOINT || "https://api.manus.ai";
-    _adapter = new ManusTaskAdapter(baseUrl, apiKey);
-    console.info(`[ManusService] Using real Manus AI at ${baseUrl} (manus-1.6-lite)`);
+    _adapter = new ManusTaskAdapter();
+    console.info(`[ManusService] Route Manus: external at ${config.MANUS_BASE_URL} (${config.MANUS_AGENT_PROFILE})`);
     return _adapter;
   }
 
-  // MANUS_MODE=mock (default) — return null; route will use Router Agent directly
   _adapter = null;
   return null;
 }
 
-/** Reset cached adapter (useful in tests). */
 export function resetManusAdapter(): void {
   _adapter = undefined;
 }
 
-// ─── Types needed by ManusTaskAdapter ─────────────────────────────────────────
+// ─── Route-level Manus Task Adapter ───────────────────────────────────────────
 
-import type { ManusDecision, ManusMessageContext } from "../adapters/manusAdapter";
-import { EMPTY_EXTRACTED_ORDER } from "@orderpilot/shared";
-import type { ExtractedOrder } from "@orderpilot/shared";
+class ManusTaskAdapter implements ManusAdapter {
+  async analyseMessage(message: string, context: ManusMessageContext): Promise<ManusDecision> {
+    const prompt = buildOrderAnalysisPrompt(message, context);
 
-// ─── Manus Task Adapter (real Manus API v2) ────────────────────────────────────
+    console.info("[ManusTask] Creating intent-classification task...");
+    const taskId = await createTask(prompt, ROUTE_INTENT_SCHEMA);
+    console.info(`[ManusTask] Task created: ${taskId}`);
+
+    const result = await pollStructuredResult(taskId, 10_000);
+    if (!result || !result.success || !result.value) {
+      throw new Error("Manus task timed out or returned no structured result");
+    }
+
+    console.info(`[ManusTask] Got result: intent=${(result.value as any)?.intent}`);
+    return flatValueToManusDecision(result.value);
+  }
+}
+
+// ─── Complaint agent reasoning ─────────────────────────────────────────────────
 
 /**
- * ManusTaskAdapter — calls the real Manus AI API.
- *
- * Flow:
- *   1. POST /v2/task.create with structured_output_schema
- *   2. Poll /v2/task.listMessages every 2s until structured_output_result appears
- *   3. Parse the value into ManusDecision
- *   4. Throw on timeout (route falls back to mock Router Agent automatically)
- *
- * API docs: https://open.manus.ai/docs/v2/task.create
+ * Run a complaint through Manus and return a structured decision.
+ * Returns null when key is missing, task times out, or any failure occurs.
+ * The caller (complaintAgent) must fall back to deterministic flow on null.
  */
-class ManusTaskAdapter implements ManusAdapter {
-  private readonly baseUrl: string;
-  private readonly apiKey: string;
+export async function runManusComplaint(
+  ctx: AgentContext,
+  order: DraftOrder | null
+): Promise<ManusComplaintDecision | null> {
+  if (!hasManusKey()) return null;
 
-  constructor(baseUrl: string, apiKey: string) {
-    this.baseUrl = baseUrl.replace(/\/$/, "");
-    this.apiKey = apiKey;
+  try {
+    const prompt = buildComplaintPrompt(ctx, order);
+    const taskId = await createTask(prompt, COMPLAINT_DECISION_SCHEMA);
+    const result = await pollStructuredResult(taskId);
+    if (!result || !result.success || !result.value) return null;
+    return normaliseDecision(result.value);
+  } catch (err) {
+    console.warn("[ManusService] complaint task failed:", (err as Error).message);
+    return null;
   }
+}
 
-  async analyseMessage(message: string, context: ManusMessageContext): Promise<ManusDecision> {
-    const prompt = buildAnalysisPrompt(message, context);
+// ─── Shared Manus v2 HTTP helpers ─────────────────────────────────────────────
 
-    console.info("[ManusTask] Creating task for message analysis...");
-    const { task_id } = await this.createTask(prompt);
-    console.info(`[ManusTask] Task created: ${task_id}`);
+interface ManusEnvelope {
+  ok?: boolean;
+  error?: { code?: string; message?: string };
+  [key: string]: unknown;
+}
 
-    const result = await this.pollForStructuredResult(task_id, 10_000);
-    console.info(`[ManusTask] Got result for ${task_id}: intent=${result.intent}`);
-    return result;
+async function manusFetch(path: string, init: RequestInit): Promise<ManusEnvelope> {
+  const res = await fetch(`${config.MANUS_BASE_URL}${path}`, {
+    ...init,
+    headers: {
+      "x-manus-api-key": config.MANUS_API_KEY,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      ...(init.headers ?? {}),
+    },
+    signal: AbortSignal.timeout(config.REQUEST_TIMEOUT_MS),
+  });
+
+  const body = (await res.json()) as ManusEnvelope;
+  if (!res.ok || body.ok === false) {
+    const code = body.error?.code ?? String(res.status);
+    const message = body.error?.message ?? res.statusText;
+    throw new Error(`Manus ${path} failed: ${code} — ${message}`);
   }
+  return body;
+}
 
-  private async createTask(prompt: string): Promise<{ task_id: string }> {
-    const res = await fetch(`${this.baseUrl}/v2/task.create`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-manus-api-key": this.apiKey,
-      },
-      body: JSON.stringify({
-        message: { content: prompt },
-        agent_profile: "manus-1.6-lite",
-        hide_in_task_list: true,
-        structured_output_schema: MANUS_DECISION_SCHEMA,
-      }),
-    });
+async function createTask(content: string, schema: object): Promise<string> {
+  const body = await manusFetch("/v2/task.create", {
+    method: "POST",
+    body: JSON.stringify({
+      message: { content },
+      structured_output_schema: schema,
+      agent_profile: config.MANUS_AGENT_PROFILE,
+      interactive_mode: false,
+      hide_in_task_list: true,
+    }),
+  });
 
-    const data = await res.json() as Record<string, any>;
-    if (!data["ok"]) {
-      throw new Error(`Manus task.create failed: ${data["error"]?.message ?? JSON.stringify(data)}`);
+  const taskId = body.task_id as string | undefined;
+  if (!taskId) throw new Error("Manus task.create returned no task_id");
+  return taskId;
+}
+
+interface TaskEvent {
+  type: string;
+  status_update?: { agent_status?: "running" | "stopped" | "waiting" | "error" };
+  error_message?: { content?: string };
+  structured_output_result?: { success?: boolean; value?: unknown; error?: string | null };
+}
+
+async function pollStructuredResult(
+  taskId: string,
+  timeoutMs?: number
+): Promise<{ success: boolean; value: unknown } | null> {
+  const timeout = timeoutMs ?? config.MANUS_POLL_TIMEOUT_MS;
+  const deadline = Date.now() + timeout;
+  // Give the task a moment to be indexed before first poll
+  await sleep(config.MANUS_POLL_INTERVAL_MS);
+
+  while (Date.now() < deadline) {
+    const body = await manusFetch(
+      `/v2/task.listMessages?task_id=${encodeURIComponent(taskId)}&order=desc&limit=50`,
+      { method: "GET" }
+    );
+    const messages = (body.messages as TaskEvent[] | undefined) ?? [];
+
+    const structured = messages.find((m) => m.type === "structured_output_result");
+    if (structured?.structured_output_result) {
+      const r = structured.structured_output_result;
+      return { success: Boolean(r.success), value: r.value };
     }
-    return { task_id: data["task_id"] as string };
-  }
 
-  private async pollForStructuredResult(
-    taskId: string,
-    timeoutMs: number
-  ): Promise<ManusDecision> {
-    const deadline = Date.now() + timeoutMs;
-    // First poll: wait 3 s for the task to be indexed
-    await sleep(3000);
-
-    while (Date.now() < deadline) {
-      await sleep(2000);
-      const url = `${this.baseUrl}/v2/task.listMessages?task_id=${encodeURIComponent(taskId)}&order=desc&limit=30`;
-      const res = await fetch(url, {
-        headers: { "x-manus-api-key": this.apiKey },
-      });
-
-      const data = await res.json() as Record<string, any>;
-      if (!data["ok"]) {
-        throw new Error(`Manus task.listMessages failed: ${data["error"]?.message}`);
-      }
-
-      const messages: any[] = data["messages"] ?? [];
-
-      for (const msg of messages) {
-        if (msg.type === "structured_output_result") {
-          const sor = msg.structured_output_result;
-          if (!sor.success) {
-            throw new Error(`Manus structured output extraction failed: ${sor.error}`);
-          }
-          return flatValueToManusDecision(sor.value);
-        }
-        if (
-          msg.type === "status_update" &&
-          msg.status_update?.agent_status === "error"
-        ) {
-          throw new Error(
-            `Manus task error: ${JSON.stringify(msg.status_update)}`
-          );
-        }
-      }
+    const status = messages.find((m) => m.type === "status_update")?.status_update?.agent_status;
+    if (status === "error") {
+      const errMsg = messages.find((m) => m.type === "error_message")?.error_message?.content;
+      throw new Error(`Manus task errored: ${errMsg ?? "unknown error"}`);
     }
+    if (status === "waiting") return null;
 
-    throw new Error(`Manus task timed out after ${timeoutMs}ms`);
+    await sleep(config.MANUS_POLL_INTERVAL_MS);
   }
+
+  return null;
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// ─── Structured output schema ──────────────────────────────────────────────────
+// ─── Complaint schema + prompt ─────────────────────────────────────────────────
 
-/**
- * JSON Schema for ManusDecision — must have all properties in `required`
- * and `additionalProperties: false` (Manus structured output requirement).
- * Nullable fields use `["string", "null"]` type array.
- */
-const MANUS_DECISION_SCHEMA = {
+const COMPLAINT_DECISION_SCHEMA = {
+  type: "object",
+  properties: {
+    severity: { type: "string", enum: ["low", "medium", "high"] },
+    risk_flags: { type: "array", items: { type: "string" } },
+    action: { type: "string", enum: ["auto_resolve", "issue_refund", "escalate"] },
+    refund_amount_gbp: {
+      type: "number",
+      description: "Refund amount in GBP. 0 if no refund is proposed.",
+    },
+    order_reference: { type: ["string", "null"] },
+    reply_text: {
+      type: "string",
+      description: "The customer-facing WhatsApp reply (British English, empathetic).",
+    },
+    owner_summary: {
+      type: "string",
+      description: "A concise summary for the shop owner if escalating; empty string otherwise.",
+    },
+    reasoning: { type: "string" },
+  },
+  required: [
+    "severity", "risk_flags", "action", "refund_amount_gbp",
+    "order_reference", "reply_text", "owner_summary", "reasoning",
+  ],
+  additionalProperties: false,
+} as const;
+
+function buildComplaintPrompt(ctx: AgentContext, order: DraftOrder | null): string {
+  return `\
+You are the Complaint agent for "${config.SHOP_NAME}", handling a customer problem received over WhatsApp. Be empathetic, accountable, and calm. Use British English. Do NOT browse the web or run code — decide using only the information below and respond directly.
+
+${formatCatalog(ctx.catalog)}
+
+Customer name: ${ctx.customer_name}
+Customer phone: ${ctx.customer_phone}
+${order ? `Linked order: ${JSON.stringify(order)}` : "No order found for this customer."}
+${ctx.image_url ? `Customer attached an image: ${ctx.image_url}` : "No image attached."}
+
+Customer's message:
+"""
+${ctx.message}
+"""
+
+Decide how to handle this complaint and return the structured result:
+- "severity": low | medium | high.
+- "risk_flags": e.g. refund_request, high_value_order, angry_tone, legal_threat, health_safety, public_review_threat, wrong_item, delivery_issue, minor_cosmetic.
+- "action":
+  * "issue_refund" ONLY when severity is low, a refund is warranted, and the amount is at or below the auto-refund limit of £${AUTO_REFUND_MAX_GBP}. Set "refund_amount_gbp" accordingly and a linked order must exist.
+  * "auto_resolve" for low-risk issues you can resolve with an apology/explanation and no refund.
+  * "escalate" for ANY medium/high-risk case, large refund, legal/health/safety concern, or when unsure. Set "owner_summary".
+- "reply_text": the message to send the customer. If escalating, reassure them their case is being passed to the team WITHOUT promising a refund, replacement, compensation, or admitting fault.
+- Never autonomously approve large refunds, accept legal liability, or make safety guarantees. When in doubt, escalate.`;
+}
+
+function formatCatalog(catalog: Product[]): string {
+  if (!catalog || catalog.length === 0) return "";
+  const lines = catalog.map((p) => `- ${p.name} (£${p.price_gbp.toFixed(2)})`).join("\n");
+  return `Products we sell:\n${lines}\n`;
+}
+
+function normaliseDecision(value: unknown): ManusComplaintDecision {
+  const v = (value ?? {}) as Record<string, unknown>;
+  const severity = (["low", "medium", "high"] as const).includes(v.severity as never)
+    ? (v.severity as ManusComplaintDecision["severity"])
+    : "medium";
+  const action = (["auto_resolve", "issue_refund", "escalate"] as const).includes(v.action as never)
+    ? (v.action as ManusComplaintDecision["action"])
+    : "escalate";
+
+  return {
+    severity,
+    risk_flags: Array.isArray(v.risk_flags) ? (v.risk_flags as string[]) : [],
+    action,
+    refund_amount_gbp: typeof v.refund_amount_gbp === "number" ? v.refund_amount_gbp : 0,
+    order_reference: typeof v.order_reference === "string" ? v.order_reference : null,
+    reply_text: typeof v.reply_text === "string" ? v.reply_text : "",
+    owner_summary: typeof v.owner_summary === "string" ? v.owner_summary : "",
+    reasoning: typeof v.reasoning === "string" ? v.reasoning : "",
+  };
+}
+
+// ─── Route-level intent schema + prompt ───────────────────────────────────────
+
+const ROUTE_INTENT_SCHEMA = {
   type: "object",
   properties: {
     intent: {
       type: "string",
       enum: ["order", "complaint", "product_question", "human_handover", "unknown"],
-      description: "The customer's intent",
     },
-    confidence: {
-      type: "number",
-      description: "Confidence score 0.0-1.0",
-    },
+    confidence: { type: "number" },
     action: {
       type: "string",
       enum: [
-        "create_draft_order",
-        "ask_missing_order_details",
-        "answer_product_question",
-        "create_complaint",
-        "escalate_to_owner",
-        "ask_clarifying_question",
-        "human_handover",
+        "create_draft_order", "ask_missing_order_details", "answer_product_question",
+        "create_complaint", "escalate_to_owner", "ask_clarifying_question", "human_handover",
       ],
-      description: "Recommended backend action",
     },
-    product_name: {
-      type: ["string", "null"],
-      description: "Product name if ordering",
-    },
-    matched_catalog_product_id: {
-      type: ["string", "null"],
-      description: "Matching product ID from the catalog",
-    },
-    quantity: {
-      type: ["number", "null"],
-      description: "Quantity ordered (null if not mentioned)",
-    },
-    fulfillment_method: {
-      type: "string",
-      enum: ["pickup", "delivery", "unknown"],
-      description: "Pickup or delivery",
-    },
-    requested_date: {
-      type: ["string", "null"],
-      description: "Requested delivery/pickup date",
-    },
-    requested_time: {
-      type: ["string", "null"],
-      description: "Requested time, if mentioned",
-    },
-    customer_notes: {
-      type: ["string", "null"],
-      description: "Special notes from the customer",
-    },
-    missing_fields: {
-      type: "array",
-      items: { type: "string" },
-      description: "Required order fields not yet provided",
-    },
-    safety_flags: {
-      type: "array",
-      items: { type: "string" },
-      description: "Risky signals: angry language, refund demands, legal threats, health/food concerns",
-    },
-    requires_human: {
-      type: "boolean",
-      description: "True if a human must review",
-    },
-    reply_text: {
-      type: "string",
-      description: "Draft WhatsApp reply for the customer",
-    },
-    reason: {
-      type: "string",
-      description: "Explanation of routing decision",
-    },
+    product_name: { type: ["string", "null"] },
+    matched_catalog_product_id: { type: ["string", "null"] },
+    quantity: { type: ["number", "null"] },
+    fulfillment_method: { type: "string", enum: ["pickup", "delivery", "unknown"] },
+    requested_date: { type: ["string", "null"] },
+    requested_time: { type: ["string", "null"] },
+    customer_notes: { type: ["string", "null"] },
+    missing_fields: { type: "array", items: { type: "string" } },
+    safety_flags: { type: "array", items: { type: "string" } },
+    requires_human: { type: "boolean" },
+    reply_text: { type: "string" },
+    reason: { type: "string" },
   },
   required: [
     "intent", "confidence", "action",
@@ -267,15 +318,13 @@ const MANUS_DECISION_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-// ─── Prompt builder ────────────────────────────────────────────────────────────
-
-function buildAnalysisPrompt(message: string, context: ManusMessageContext): string {
+function buildOrderAnalysisPrompt(message: string, context: ManusMessageContext): string {
   const productList = context.catalog
     .filter((p) => p.available)
-    .map((p) => `  - ${p.id ?? p.name}: ${p.name} £${p.price_gbp} — ${p.description}`)
+    .map((p) => `  - ${(p as any).id ?? p.name}: ${p.name} £${p.price_gbp} — ${p.description}`)
     .join("\n");
 
-  return `You are a customer service AI for a small bakery business (${context.business_id}).
+  return `You are a customer service AI for ${context.business_id} (${config.SHOP_NAME}).
 
 Analyze the following WhatsApp message and determine the customer's intent, extract order details if applicable, and draft a friendly reply.
 
@@ -286,21 +335,18 @@ Available products:
 ${productList}
 
 Rules:
-- Classify intent as one of: order, complaint, product_question, human_handover, unknown
+- Classify intent: order, complaint, product_question, human_handover, or unknown
 - For orders: extract product, quantity, date, fulfillment method (pickup or delivery)
-- Set missing_fields to the list of required fields that are not present (product_name, requested_date, fulfillment_method, quantity)
+- Set missing_fields to any required missing fields (product_name, requested_date, fulfillment_method, quantity)
 - Flag safety_flags for: refund requests, legal threats, angry/hostile language, food safety concerns
 - If safety_flags is non-empty, set requires_human=true and use complaint or human_handover intent
-- DO NOT auto-promise refunds or legal actions in reply_text
+- DO NOT promise refunds or legal actions in reply_text
 - reply_text should be warm, friendly, and professional
-- matched_catalog_product_id: set to the product id from the catalog if you can match the product, else null
+- matched_catalog_product_id: set to the product id from the catalog if matchable, else null
 
 Respond with the structured output only.`;
 }
 
-// ─── Result mapper ─────────────────────────────────────────────────────────────
-
-/** Convert the flat structured output value into a ManusDecision. */
 function flatValueToManusDecision(v: any): ManusDecision {
   const extracted: ExtractedOrder = {
     product_name: v.product_name ?? null,
@@ -325,140 +371,5 @@ function flatValueToManusDecision(v: any): ManusDecision {
   };
 }
 
-// Re-export for route use
+// Re-export adapter type for routes
 export type { ManusAdapter } from "../adapters/manusAdapter";
-export async function analyseComplaint(
-  customerMessage: string,
-  businessContext: string
-): Promise<ManusAnalysisResult> {
-  // Only call real Manus when explicitly in external mode with a key.
-  // When MANUS_MODE=mock, always use keyword heuristics — safe for demos.
-  if (process.env.MANUS_MODE === "external" && process.env.MANUS_API_KEY) {
-    return callManusApi(customerMessage, businessContext);
-  }
-  return mockAnalysis(customerMessage);
-}
-
-async function callManusApi(
-  customerMessage: string,
-  _businessContext: string
-): Promise<ManusAnalysisResult> {
-  const baseUrl = process.env.MANUS_ENDPOINT ?? "https://api.manus.ai";
-  const apiKey  = process.env.MANUS_API_KEY!;
-
-  const prompt = `You are a customer complaint analyst for a small business.
-Analyse the following customer message and determine the sentiment, severity, and any key topics.
-
-Customer message: "${customerMessage}"
-
-Respond ONLY with the structured output.`;
-
-  const schema = {
-    type: "object",
-    properties: {
-      sentiment: { type: "string", enum: ["positive", "neutral", "negative", "hostile"] },
-      severity_score: { type: "number" },
-      suggested_severity: { type: "string", enum: ["low", "medium", "high"] },
-      key_topics: { type: "array", items: { type: "string" } },
-      suggested_reply: { type: "string" },
-      escalate: { type: "boolean" },
-    },
-    required: ["sentiment", "severity_score", "suggested_severity", "key_topics", "suggested_reply", "escalate"],
-    additionalProperties: false,
-  };
-
-  const adapter = new ManusTaskAdapter(baseUrl, apiKey);
-  // Reuse the task infrastructure but with a complaint-specific prompt
-  const createRes = await fetch(`${baseUrl}/v2/task.create`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-manus-api-key": apiKey },
-    body: JSON.stringify({
-      message: { content: prompt },
-      agent_profile: "manus-1.6-lite",
-      hide_in_task_list: true,
-      structured_output_schema: schema,
-    }),
-  });
-  const createData = await createRes.json() as Record<string, any>;
-  if (!createData["ok"]) throw new Error(`Manus complaint task failed: ${createData["error"]?.message}`);
-
-  const taskId = createData["task_id"] as string;
-  const deadline = Date.now() + 10_000;
-  await sleep(3000);
-
-  while (Date.now() < deadline) {
-    await sleep(2000);
-    const listRes = await fetch(
-      `${baseUrl}/v2/task.listMessages?task_id=${encodeURIComponent(taskId)}&order=desc&limit=20`,
-      { headers: { "x-manus-api-key": apiKey } }
-    );
-    const listData = await listRes.json() as Record<string, any>;
-    for (const msg of (listData["messages"] ?? []) as any[]) {
-      if (msg.type === "structured_output_result" && msg.structured_output_result?.success) {
-        return msg.structured_output_result.value as ManusAnalysisResult;
-      }
-    }
-  }
-
-  // Fallback to mock on timeout
-  console.warn("[ManusService] callManusApi timed out — falling back to mock analysis");
-  return mockAnalysis(customerMessage);
-}
-
-function mockAnalysis(message: string): ManusAnalysisResult {
-  const lower = message.toLowerCase();
-
-  const hostileWords = ["furious", "disgusting", "never again", "sue", "legal", "solicitor", "court"];
-  const negativeWords = ["unhappy", "disappointed", "wrong", "broken", "damaged", "missing", "refund", "angry", "terrible", "awful"];
-  const positiveWords = ["thank", "great", "love", "amazing", "excellent"];
-
-  const isHostile = hostileWords.some((w) => lower.includes(w));
-  const isNegative = negativeWords.some((w) => lower.includes(w));
-  const isPositive = positiveWords.some((w) => lower.includes(w));
-
-  let sentiment: ManusAnalysisResult["sentiment"] = "neutral";
-  let severityScore = 3;
-
-  if (isHostile) {
-    sentiment = "hostile";
-    severityScore = 8;
-  } else if (isNegative) {
-    sentiment = "negative";
-    severityScore = 5;
-  } else if (isPositive) {
-    sentiment = "positive";
-    severityScore = 2;
-  }
-
-  const suggestedSeverity: ManusAnalysisResult["suggested_severity"] =
-    severityScore >= 7 ? "high" : severityScore >= 4 ? "medium" : "low";
-
-  return {
-    sentiment,
-    severity_score: severityScore,
-    suggested_severity: suggestedSeverity,
-    key_topics: extractKeyTopics(lower),
-    suggested_reply: buildSuggestedReply(sentiment),
-    escalate: severityScore >= 7,
-  };
-}
-
-function extractKeyTopics(lower: string): string[] {
-  const topics = [];
-  if (lower.includes("refund")) topics.push("refund");
-  if (lower.includes("delivery") || lower.includes("late")) topics.push("delivery");
-  if (lower.includes("quality") || lower.includes("wrong") || lower.includes("damaged")) topics.push("product_quality");
-  if (lower.includes("allergy") || lower.includes("ill") || lower.includes("sick")) topics.push("health_safety");
-  if (lower.includes("legal") || lower.includes("sue") || lower.includes("court")) topics.push("legal_threat");
-  return topics;
-}
-
-function buildSuggestedReply(sentiment: ManusAnalysisResult["sentiment"]): string {
-  if (sentiment === "hostile") {
-    return "We sincerely apologise for your experience. A member of our team will contact you personally within 2 hours to resolve this matter.";
-  }
-  if (sentiment === "negative") {
-    return "We're very sorry to hear you've had a problem. Could you please share a few more details so we can put things right for you?";
-  }
-  return "Thank you for getting in touch. We'd love to help — could you share more details about what happened?";
-}

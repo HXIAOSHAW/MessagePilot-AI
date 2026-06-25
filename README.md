@@ -13,7 +13,7 @@ MessagePilot AI is a message-based business agent for small WordPress and WooCom
 | Customer message | What MessagePilot does |
 |---|---|
 | "I want a chocolate birthday cake for Friday pickup" | Creates a draft order + PayPal checkout link + sends reply |
-| "My cake arrived damaged and I want a refund" | Creates complaint case + owner task + sends safe reply (no auto-refund) |
+| "My cake arrived damaged and I want a refund" | Manus assesses severity → auto-resolves or auto-refunds small low-risk cases (≤ £30), otherwise escalates with an owner task + sends a safe reply |
 | "How much is the vanilla cake?" | Answers with the price from the product catalog |
 | "I need to speak to a real person" | Flags for human handover |
 
@@ -31,22 +31,25 @@ Customer WhatsApp message
    MessagePilot Backend    ← Express + TypeScript + Zod validation
         │
         ▼
-   Manus AI                ← Main reasoning agent: intent, sentiment, reply draft
-        │                     (mock heuristics when MANUS_API_KEY not set)
-        ▼
-   Safety Agent            ← Backend validates: blocks refund/legal/health auto-replies
-        │
+     Router               ← Classifies intent (order / complaint / question / handover)
    ┌────┴────┐
    ▼         ▼
-Order       Complaint
-Agent       Agent
-   │              │
-   ▼              ▼
-PayPal        Owner Task    ← Owner reviews high-risk cases
-checkout      (Supabase)
-   │
-   ▼
-Supabase      ← Stores messages, orders, complaints, tasks, logs
+Order       Complaint Agent
+Agent          │
+   │           ▼
+   │        Manus AI       ← Reasons about the complaint, returns a structured
+   │           │             decision (severity, action, reply). Deterministic
+   │           │             fallback when MANUS_API_KEY is unset or Manus fails.
+   │           ▼
+   │        Guardrails     ← Backend enforces policy before acting:
+   │           │             auto-refund only ≤ £30 & low severity & real order;
+   │           │             medium/high, legal/health → escalate, never admit fault
+   ▼           ▼
+PayPal      Refund / Owner Task
+checkout    (Owner reviews escalated cases)
+   │           │
+   ▼           ▼
+Supabase      ← Stores messages, orders, complaints, tasks, logs, events
 ```
 
 ---
@@ -56,10 +59,10 @@ Supabase      ← Stores messages, orders, complaints, tasks, logs
 | Tool | Role |
 |---|---|
 | **Wassist** | WhatsApp customer message interface — sends messages in, receives replies out |
-| **Manus AI** | Main reasoning agent — interprets business intent, analyses sentiment, drafts reply |
-| **PayPal Sandbox** | Checkout and payment — order only confirmed after `/payment/status` webhook fires |
-| **Supabase** | Business memory — stores everything: messages, orders, complaints, tasks, logs |
-| **Backend** | Safety validation and action execution — nothing runs without backend approval |
+| **Manus AI** | Complaint agent brain — reasons about the complaint and returns a structured decision (severity, action, reply) via the Manus v2 API |
+| **PayPal Sandbox** | Checkout and payment — order only confirmed after `/payment/status` webhook fires; also processes guardrailed refunds |
+| **Supabase** | Business memory — stores everything: messages, orders, complaints, tasks, logs, events |
+| **Backend** | Safety validation and action execution — enforces guardrails on Manus's decisions; nothing runs without backend approval |
 
 ---
 
@@ -94,16 +97,17 @@ cp .env.example .env
 
 Leave all credentials blank. The backend runs entirely in **mock mode** — no external accounts needed for the demo.
 
-| Blank env var | What runs instead |
+| Blank / unset env var | What runs instead |
 |---|---|
-| `MANUS_MODE=mock` (default) | Local Router Agent handles intent (no credentials) |
+| `MANUS_API_KEY` unset | Deterministic complaint fallback (heuristic severity + safe escalation) |
+| `MANUS_MODE=mock` | Local Router Agent handles intent (no external calls) |
 | `WASSIST_API_KEY` | Console-logged replies |
-| `PAYPAL_CLIENT_ID` | Mock checkout URL |
+| `PAYPAL_CLIENT_ID` | Mock checkout URL + mock refunds |
 | `DATA_MODE` not set | In-memory store (resets on restart) |
 
-### Supabase data mode
+To go live: set `MANUS_API_KEY` to enable the Manus-powered complaint agent, and set `DATA_MODE=supabase` with Supabase credentials to persist to the database.
 
-To use real Supabase for product lookup and order persistence:
+### Supabase data mode
 
 ```bash
 DATA_MODE=supabase
@@ -111,29 +115,11 @@ SUPABASE_URL=https://oamnvukqwqtqvmbqivhm.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
 ```
 
-To verify the Supabase dataset is in place before a demo:
-
+Verify the dataset is in place before a demo:
 ```bash
-# Check products exist in Supabase
 bash scripts/check_supabase_products.sh
-
-# Run full order flow and assert Supabase fields
 DATA_MODE=supabase SUPABASE_STRICT=true bash scripts/demo_supabase_order_flow.sh
 ```
-
-`SUPABASE_STRICT=true` prevents silent fallback to local JSON — fails clearly if products are missing.
-
-### Manus teammate mode
-
-Teammate Manus service endpoint contract: `apps/backend/src/adapters/manusAdapter.ts`
-
-```bash
-MANUS_MODE=external
-MANUS_ENDPOINT=https://<teammate-manus-url>
-MANUS_API_KEY=<optional>
-```
-
-In external mode, if Manus fails, the backend automatically falls back to the local Router Agent and sets `manus_fallback=true` in the response. The Backend Safety Agent always runs regardless.
 
 ---
 
@@ -247,16 +233,20 @@ messagepilot-ai/
 2. Implement the `PaymentAdapter` interface
 3. Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` in `.env`
 
-### Connect Manus AI (teammate)
-1. Build a service that accepts `POST /analyse` with `{ message, business_id, customer_name }`
-2. Return the `ManusDecision` shape defined in `apps/backend/src/adapters/manusAdapter.ts`
-3. Set in `.env`: `MANUS_MODE=external`, `MANUS_ENDPOINT=<your-url>`, `MANUS_API_KEY=<optional>`
-4. Backend Safety Agent always runs after Manus and has final authority
+### Connect Manus AI
+The complaint agent uses the **Manus v2 API** (`apps/backend/src/services/manusService.ts`) for reasoning.
+1. Get a key at [open.manus.ai](https://open.manus.ai)
+2. Set `MANUS_API_KEY` in `.env` (tune `MANUS_AGENT_PROFILE`, `MANUS_POLL_TIMEOUT_MS` if needed)
+3. The agent activates automatically; if Manus is unset/fails it falls back to deterministic flow.
+4. Backend guardrails always re-validate decisions before any refund/escalation.
+
+For route-level intent classification via external Manus (advanced):
+- Set `MANUS_MODE=external`, `MANUS_ENDPOINT=<url>` — see `apps/backend/src/adapters/manusAdapter.ts`
 
 ### Connect Supabase
 1. Run `supabase/schema.sql` in your Supabase project
 2. Run `supabase/seed.sql` for demo data (Luna Bakery products)
-3. Set in `.env`: `DATA_MODE=supabase`, `SUPABASE_URL=...`, `SUPABASE_SERVICE_ROLE_KEY=...`
+3. Set `DATA_MODE=supabase`, `SUPABASE_URL=...`, `SUPABASE_SERVICE_ROLE_KEY=...` in `.env`
 4. Verify: `bash scripts/check_supabase_products.sh`
 
 ---

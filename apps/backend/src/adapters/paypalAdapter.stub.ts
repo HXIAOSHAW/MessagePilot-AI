@@ -12,7 +12,7 @@
  */
 
 import type { DraftOrder } from "@orderpilot/shared";
-import type { CheckoutResult } from "../types";
+import type { CheckoutResult, RefundResult } from "../types";
 import type { PaymentAdapter } from "./paymentAdapter";
 
 const PAYPAL_SANDBOX_BASE = "https://api-m.sandbox.paypal.com";
@@ -56,5 +56,10 @@ export class PayPalAdapter implements PaymentAdapter {
   ): Promise<"pending" | "completed" | "failed" | "refunded"> {
     // TODO: implement GET ${this.baseUrl}/v2/checkout/orders/${orderId}
     throw new Error("PayPalAdapter.getPaymentStatus not yet implemented");
+  }
+
+  async refund(orderId: string, amountGbp: number, reason: string): Promise<RefundResult> {
+    // TODO: implement POST ${this.baseUrl}/v2/payments/captures/${captureId}/refund
+    throw new Error("PayPalAdapter.refund not yet implemented");
   }
 }

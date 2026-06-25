@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import type { DraftOrder } from "@orderpilot/shared";
-import type { CheckoutResult } from "../types";
+import type { CheckoutResult, RefundResult } from "../types";
 import type { PaymentAdapter } from "./paymentAdapter";
 
 /**
@@ -38,5 +38,13 @@ export class MockPaymentAdapter implements PaymentAdapter {
   ): Promise<"pending" | "completed" | "failed" | "refunded"> {
     console.log(`[MockPayment] Status check for order ${orderId}`);
     return "pending";
+  }
+
+  async refund(orderId: string, amountGbp: number, reason: string): Promise<RefundResult> {
+    const refundId = `MOCK-REFUND-${uuidv4().substring(0, 8).toUpperCase()}`;
+    console.log(
+      `[MockPayment] Refunded £${amountGbp.toFixed(2)} for order ${orderId} — ${reason}`
+    );
+    return { refund_id: refundId, status: "COMPLETED", amount_gbp: amountGbp };
   }
 }
