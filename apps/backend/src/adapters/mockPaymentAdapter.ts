@@ -4,8 +4,16 @@ import type { CheckoutResult } from "../types";
 import type { PaymentAdapter } from "./paymentAdapter";
 
 /**
- * Mock payment adapter — returns fake checkout URLs.
- * Used when no PayPal credentials are configured.
+ * Mock Payment Adapter — used for demo when no PayPal credentials are set.
+ *
+ * In the real flow:
+ *   1. createCheckout() → returns a PayPal checkout URL sent to the customer
+ *   2. Customer pays on PayPal
+ *   3. PayPal calls POST /payment/status with status="completed"
+ *   4. Backend marks order as "confirmed" — never before that webhook fires
+ *
+ * To connect PayPal Sandbox, implement paypalAdapter.stub.ts and set
+ * PAYPAL_CLIENT_ID + PAYPAL_CLIENT_SECRET in .env.
  */
 export class MockPaymentAdapter implements PaymentAdapter {
   async createCheckout(order: DraftOrder): Promise<CheckoutResult> {

@@ -1,36 +1,44 @@
-# OrderPilot AI — Demo Script
+# MessagePilot AI — Demo Script
 
-_Estimated time: 5–7 minutes_
+_Estimated time: 4–5 minutes_
 
 ---
 
-## Setup (before demo)
+## Setup
 
 ```bash
 pnpm install
-cp .env.example .env
-pnpm dev:backend
+cp .env.example .env   # leave all credentials blank — mock mode works
+pnpm dev:backend       # → http://localhost:3001
 ```
 
-Open a second terminal for curl commands.
+Open a second terminal for the curl commands below.
 
 ---
 
-## 1. Show the health endpoint (30s)
-
-**Say:** "The backend is running. Let's check it — you can see it's using the mock payment and messaging adapters by default, so no external accounts needed."
+## 0. Health check (15s)
 
 ```bash
-curl http://localhost:3001/health | jq
+curl http://localhost:3001/health
 ```
 
-**Point out:** `storage: "in-memory (mock)"`, adapter list.
+Point out:
+- `"storage": "in-memory (mock)"` — no Supabase credentials needed
+- `"manus": "mock"` — reasoning runs without Manus API key
+- `"payment": "mock"` — checkout URL is simulated
+- `"messaging": "mock"` — replies are logged to console, not sent to WhatsApp
 
 ---
 
-## 2. Order flow — happy path (90s)
+## Demo 1 — Order (90s)
 
-**Say:** "Sarah messages the bakery on WhatsApp. She wants a chocolate birthday cake for Friday. Watch what happens."
+**Scenario:** Sarah messages the bakery on WhatsApp.
+
+**Customer message:**
+> "Hi, I want to order a chocolate birthday cake for Friday pickup."
+
+**Expected flow:**  
+Wassist message → MessagePilot backend → Manus reasoning → Safety check → draft order → mock PayPal checkout URL → Supabase / memory log
 
 ```bash
 curl -s -X POST http://localhost:3001/agent/message \
@@ -39,99 +47,107 @@ curl -s -X POST http://localhost:3001/agent/message \
     "business_id": "demo_luna_bakery",
     "customer_phone": "+447000000000",
     "customer_name": "Sarah",
-    "message": "I want to order a chocolate birthday cake for Friday pickup",
+    "message": "Hi, I want to order a chocolate birthday cake for Friday pickup.",
     "image_url": null,
-    "conversation_id": "wa_conv_123"
-  }' | jq '{intent, reply, checkout_url, total: .order.total_gbp}'
+    "conversation_id": "wa_conv_demo_order"
+  }'
 ```
 
-**Point out:**
-- `intent: "order"` — Router Agent classified correctly
-- `reply` — natural, friendly message with order summary
-- `checkout_url` — customer taps this to pay (PayPal in production)
-- `total` — £29 calculated automatically from catalog
+What to show:
+- `intent: "order"` — Manus identified the purchase intent
+- `conversation_state: "awaiting_payment"` — order is complete, checkout ready
+- `checkout_url` — mock PayPal link sent to the customer
+- `extracted_order.product_name` — product matched from catalog
+- `extracted_order.requested_date: "Friday"` — date extracted from natural language
+- `safety_flags: []` — clean message, no safety intervention needed
+- `reply_text` — the friendly message sent back to the customer via Wassist
 
 ---
 
-## 3. Order flow — missing info (60s)
+## Demo 2 — Complaint (90s)
 
-**Say:** "What if the customer forgets to say when they want it? The agent asks for the missing info instead of guessing."
+**Scenario:** A customer had a bad experience and messages the bakery.
+
+**Customer message:**
+> "My cake arrived with the wrong name and the party is tonight. I am really upset."
+
+**Expected flow:**  
+Wassist message → MessagePilot backend → Manus reasoning → Safety check → complaint case → owner task → no refund or compensation promised
 
 ```bash
 curl -s -X POST http://localhost:3001/agent/message \
   -H "Content-Type: application/json" \
   -d '{
     "business_id": "demo_luna_bakery",
-    "customer_phone": "+447000000000",
-    "customer_name": "Tom",
-    "message": "I want to order a chocolate cake",
+    "customer_phone": "+447111111111",
+    "customer_name": "Emma",
+    "message": "My cake arrived with the wrong name and the party is tonight. I am really upset.",
     "image_url": null,
-    "conversation_id": "wa_conv_124"
-  }' | jq '{intent, reply}'
+    "conversation_id": "wa_conv_demo_complaint"
+  }'
 ```
 
----
+What to show:
+- `intent: "complaint"` — Manus / Safety Agent identified complaint signals
+- `safety_flags` — "wrong name", "really upset" detected as risky signals
+- `complaint_id` — structured complaint case created
+- `requires_human: false` — medium severity, agent handled safely
+- `reply_text` — empathetic response, **no refund promised**, no legal language
 
-## 4. Complaint flow — low severity (60s)
-
-**Say:** "Now let's look at complaints. Rachel received the wrong cake. Low severity — agent handles it gracefully without escalation."
+Then show a high-severity case with a refund demand:
 
 ```bash
 curl -s -X POST http://localhost:3001/agent/message \
   -H "Content-Type: application/json" \
   -d '{
     "business_id": "demo_luna_bakery",
-    "customer_phone": "+447111000001",
-    "customer_name": "Rachel",
-    "message": "I ordered a chocolate cake but got a vanilla one. Bit disappointed.",
-    "image_url": null,
-    "conversation_id": "wa_conv_125"
-  }' | jq '{intent, severity: .complaint.severity, escalated: .complaint.requires_escalation, reply}'
-```
-
----
-
-## 5. Complaint flow — high severity + safety rules (90s)
-
-**Say:** "Now James is furious and demanding a refund. This triggers our Safety Agent."
-
-```bash
-curl -s -X POST http://localhost:3001/agent/message \
-  -H "Content-Type: application/json" \
-  -d '{
-    "business_id": "demo_luna_bakery",
-    "customer_phone": "+447111000003",
+    "customer_phone": "+447111111112",
     "customer_name": "James",
     "message": "I am absolutely furious. My cake was completely wrong and I want a full refund immediately.",
     "image_url": null,
-    "conversation_id": "wa_conv_126"
-  }' | jq '{intent, severity: .complaint.severity, escalated: .complaint.requires_escalation, owner_task_priority: .owner_task.priority, reply}'
+    "conversation_id": "wa_conv_demo_refund"
+  }'
 ```
 
-**Point out:**
-- `severity: "high"` — Manus analysis detected hostile tone
-- `requires_escalation: true` — owner must handle this manually
-- `owner_task_priority: "urgent"` — task created for the owner dashboard
-- `reply` — safe holding message, **not** an automatic refund approval
+What to show:
+- `requires_human: true` — refund demand triggers human escalation
+- `safety_flags: ["refund", ...]` — safety rules fired
+- `reply_text` — safe holding reply only, **the backend never auto-approves refunds**
 
 ---
 
-## 6. Dashboard (30s)
+## Demo 3 — Dashboard (30s)
 
-**Say:** "Finally, the owner can see a summary of everything that's happened."
+After running both demos above, check the owner summary:
 
 ```bash
-curl http://localhost:3001/dashboard/summary?business_id=demo_luna_bakery | jq
+curl "http://localhost:3001/dashboard/summary?business_id=demo_luna_bakery"
 ```
 
-**Point out:** messages, orders, complaints, open tasks, top products.
+What to show:
+- `orders_drafted` — count of draft orders created
+- `complaints_received` — count of complaint cases
+- `owner_tasks_open` — tasks waiting for human review
+- `top_products` — most ordered products
+- `open_tasks` — list of tasks with priority
 
 ---
 
-## What's next (30s)
+## Run all automated tests (30s)
 
-- Plug in **Wassist** for real WhatsApp delivery → `wassistAdapter.stub.ts`
-- Plug in **PayPal sandbox** for real checkout → `paypalAdapter.stub.ts`
-- Connect **Supabase** for persistent storage → set `SUPABASE_URL` in `.env`
-- Connect **Manus AI** for better sentiment analysis → set `MANUS_API_KEY` in `.env`
-- Add the **Next.js dashboard** → `apps/web/`
+```bash
+bash scripts/demo_agent_core.sh
+```
+
+Runs all 7 canonical test cases with pass/fail assertions.
+
+---
+
+## What's next — integration hand-offs
+
+| Integration | File | Env vars needed |
+|---|---|---|
+| Wassist (real WhatsApp) | `apps/backend/src/adapters/wassistAdapter.stub.ts` | `WASSIST_API_KEY` |
+| PayPal Sandbox (real checkout) | `apps/backend/src/adapters/paypalAdapter.stub.ts` | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` |
+| Manus AI (real reasoning) | `apps/backend/src/services/manusService.ts` | `MANUS_API_KEY` |
+| Supabase (persistent memory) | `supabase/schema.sql` then `.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |

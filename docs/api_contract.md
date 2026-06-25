@@ -1,6 +1,16 @@
-# OrderPilot AI — API Contract
+# MessagePilot AI — API Contract
 
 Base URL: `http://localhost:3001`
+
+## Team integration points
+
+Teammates only need three endpoints:
+
+| Endpoint | Who calls it | Purpose |
+|---|---|---|
+| `POST /agent/message` | **Wassist** | Sends every inbound customer WhatsApp message into the backend |
+| `POST /payment/status` | **PayPal** | Fires when a customer completes or fails a payment — order confirmed here |
+| `GET /dashboard/summary` | **Frontend / demo** | Owner summary — orders, complaints, open tasks |
 
 ---
 
@@ -13,7 +23,7 @@ Returns the server status and adapter configuration.
 ```json
 {
   "status": "ok",
-  "service": "OrderPilot AI Backend",
+  "service": "MessagePilot AI Backend",
   "version": "0.1.0",
   "timestamp": "2026-06-25T12:00:00.000Z",
   "storage": "in-memory (mock)",

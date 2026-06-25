@@ -1,79 +1,145 @@
-# OrderPilot AI — Architecture
+# MessagePilot AI — Architecture
 
-## Overview
+## The operating loop
 
 ```
-WhatsApp (customer)
+Customer WhatsApp message
         │
         ▼
-  [Wassist Adapter]           ← mock by default; plug in real Wassist later
+   Wassist                         ← WhatsApp message interface
+        │  POST /agent/message
+        ▼
+   MessagePilot Backend            ← Express + TypeScript
+        │  Zod validation
+        ▼
+   Manus AI (ManusService)         ← Main reasoning agent
+        │                             intent · sentiment · reply draft · severity
+        │                             mock heuristics when MANUS_API_KEY not set
+        ▼
+   Safety Agent                    ← Backend validates Manus output
+        │                             blocks: refund · legal · health/safety
+        │                             no business action runs without this check
+        │
+   ┌────┴────────────────┐
+   ▼                     ▼
+Order Agent          Complaint Agent
+   │                     │
+   ├── CatalogService     ├── ManusService (severity)
+   ├── slot extraction    ├── SafetyAgent (blocked topics)
+   └── draft order        └── OwnerTaskService (escalation)
         │
         ▼
-  POST /agent/message         ← Express route (Zod-validated)
+   PaymentAdapter
+        │  createCheckout()
+        ▼
+   MockPaymentAdapter    ← demo: fake checkout URL
+   PayPalAdapter.stub    ← connect PayPal Sandbox here
         │
         ▼
-  [Router Agent]              ← keyword scoring → intent classification
+   POST /payment/status  ← PayPal webhook fires when customer pays
+        │                   order only confirmed after this
+        ▼
+   Supabase / mock store ← messages · orders · complaints · tasks · logs
         │
-    ┌───┴───────────────────┐
-    ▼                       ▼
-[Order Agent]        [Complaint Agent]
-    │                       │
-    │   ┌───────────────────┘
-    │   │
-    ▼   ▼
-[Safety Agent]              ← blocks refund/legal/health auto-replies
-    │
-    ▼
-[Services layer]
-  ├── CatalogService         ← reads catalog JSON, fuzzy product match
-  ├── StateService           ← per-conversation turn memory (in-memory)
-  ├── OwnerTaskService       ← creates escalation tasks
-  └── ManusService           ← AI analysis (mock or real Manus API)
-    │
-    ▼
-[Adapters]
-  ├── MessagingAdapter       ← sendMessage() to WhatsApp (mock/Wassist)
-  └── PaymentAdapter         ← createCheckout() (mock/PayPal)
-    │
-    ▼
-[Database layer]
-  ├── Supabase client        ← real if env vars set, mock store otherwise
-  └── Repositories           ← save/query orders, complaints, tasks, logs
+        ▼
+   MessagingAdapter
+        │  sendMessage(reply_text)
+        ▼
+   MockMessagingAdapter  ← demo: logs to console
+   WassistAdapter.stub   ← connect Wassist here
+        │
+        ▼
+   Wassist               ← delivers reply to customer on WhatsApp
 ```
+
+---
+
+## Tool roles
+
+| Tool | Role |
+|---|---|
+| **Wassist** | WhatsApp customer message interface — delivers inbound messages and sends outbound replies |
+| **Manus AI** | Main reasoning agent — interprets business intent, analyses sentiment, drafts the customer reply |
+| **PayPal Sandbox** | Checkout and payment simulation — order is only marked confirmed after the `/payment/status` webhook fires |
+| **Supabase** | Business memory, state and analytics — stores every message, order, complaint, task and agent log |
+| **Backend** | Safety validation and action execution — every Manus output is checked before any action runs |
+
+---
 
 ## Adapter pattern
 
-All external integrations are hidden behind clean interfaces:
+All external integrations are hidden behind interfaces. The factory functions pick mock or real automatically based on env vars.
 
-| Interface | Mock | Real (stub) |
+| Interface | Demo (mock) | Real integration |
 |---|---|---|
-| `MessagingAdapter` | `MockMessagingAdapter` | `wassistAdapter.stub.ts` |
-| `PaymentAdapter` | `MockPaymentAdapter` | `paypalAdapter.stub.ts` |
+| `MessagingAdapter` | `MockMessagingAdapter` | `wassistAdapter.stub.ts` → set `WASSIST_API_KEY` |
+| `PaymentAdapter` | `MockPaymentAdapter` | `paypalAdapter.stub.ts` → set `PAYPAL_CLIENT_ID` |
 
-The factory functions (`getMessagingAdapter`, `getPaymentAdapter`) automatically switch between mock and real based on whether the relevant env vars are set.
+---
 
-## Agent execution model
+## Manus positioning
 
-Each agent is a pure async function:
+```
+                    ┌─────────────────────┐
+                    │     Manus AI         │
+                    │  (reasoning layer)   │
+                    │                     │
+                    │  - intent           │
+                    │  - sentiment        │
+                    │  - severity score   │
+                    │  - reply draft      │
+                    │  - escalate flag    │
+                    └──────────┬──────────┘
+                               │  ManusAnalysisResult
+                               ▼
+                    ┌─────────────────────┐
+                    │   Safety Agent       │
+                    │  (backend layer)     │
+                    │                     │
+                    │  validates output   │
+                    │  blocks blocked     │
+                    │  topics             │
+                    │  forces escalation  │
+                    └──────────┬──────────┘
+                               │  safe to execute
+                               ▼
+                    business action (order / complaint / task)
+```
+
+Manus thinks. Backend validates. Nothing executes without safety approval.
+
+---
+
+## Safety rules
+
+The Safety Agent runs on every message before any business action:
+
+- **Never** auto-approve a refund
+- **Never** acknowledge legal liability
+- **Never** promise compensation
+- **Never** auto-resolve health/safety issues (allergy, injury, food poisoning)
+- Angry or hostile messages → always human-reviewed
+- High-severity complaints → always create an OwnerTask
+
+---
+
+## Storage
+
+| Mode | How to activate | What happens |
+|---|---|---|
+| In-memory mock | Default (no env vars needed) | Data lives in RAM, resets on restart — safe for demos |
+| Supabase | Set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | Run `supabase/schema.sql` first, then `seed.sql` |
+
+---
+
+## Agent functions
+
+Each agent is a pure async function — easy to test and extend:
 
 ```typescript
 async function runOrderAgent(ctx: AgentContext): Promise<AgentResult>
 async function runComplaintAgent(ctx: AgentContext): Promise<AgentResult>
 ```
 
-`AgentContext` contains everything the agent needs: the message, customer details, business catalog.  
-`AgentResult` contains the customer reply, any created objects (order/complaint/task), and metadata.
-
-## Safety model
-
-The Safety Agent is applied to every complaint reply before it is sent:
-
-- Any message touching blocked topics (refund, legal, health/safety, compensation) triggers an override reply
-- The override reply asks the human owner to follow up
-- High-severity cases always create an OwnerTask regardless of topic matching
-- No agent ever auto-approves refunds, compensation, legal claims, or health/safety issues
-
-## Storage
-
-- **Mock mode** (default): all data lives in `mockStore` (in-memory Maps). Data is lost on server restart. Safe for demos.
-- **Supabase mode**: set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env`. Run `supabase/schema.sql` first.
+`AgentContext` — message, customer info, business catalog  
+`AgentResult` — reply text, created order/complaint/task, extracted slots, safety flags

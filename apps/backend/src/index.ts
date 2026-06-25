@@ -46,9 +46,10 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════════╗
-║   OrderPilot AI Backend                    ║
+║   MessagePilot AI Backend                  ║
 ║   Running on http://localhost:${PORT}         ║
-║   Storage: ${process.env.SUPABASE_URL ? "Supabase" : "in-memory mock"}                   ║
+║   Storage: ${process.env.SUPABASE_URL ? "Supabase        " : "in-memory mock   "}          ║
+║   Manus:   ${process.env.MANUS_API_KEY  ? "connected      " : "mock (no key)    "}          ║
 ╚════════════════════════════════════════════╝
   `);
 });

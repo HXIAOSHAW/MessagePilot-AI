@@ -1,15 +1,24 @@
 import type { ManusAnalysisResult } from "../types";
 
 /**
- * Manus AI Service
+ * Manus AI Service — Main Reasoning Agent
  *
- * Analyses complaint text for sentiment, severity and suggested reply.
+ * Manus acts as the primary intelligence layer in the MessagePilot AI pipeline.
+ * It analyses the customer message and returns:
+ *   - sentiment (positive / neutral / negative / hostile)
+ *   - severity score and suggested severity level
+ *   - key topics (refund, delivery, quality, health/safety, legal)
+ *   - a suggested customer reply draft
+ *   - an escalation flag
  *
- * If MANUS_API_KEY is set, uses the real Manus API.
- * Otherwise, returns a mock analysis based on simple keyword heuristics.
+ * The Backend Safety Agent ALWAYS runs after Manus and validates the output
+ * before any business action (order, checkout, task) is executed.
  *
- * TODO: Replace mock implementation with real Manus API calls.
- * Manus docs: https://docs.manus.app (TODO: confirm URL with team)
+ * Modes:
+ *   - MANUS_API_KEY set   → real Manus API call (stub ready, see callManusApi below)
+ *   - MANUS_API_KEY unset → mock analysis via keyword heuristics (demo-safe)
+ *
+ * TODO: Implement callManusApi() with the real Manus API endpoint.
  */
 export async function analyseComplaint(
   customerMessage: string,
