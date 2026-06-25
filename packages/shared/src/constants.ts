@@ -128,6 +128,12 @@ export const SAFETY_BLOCKED_TOPICS = [
 
 export const HIGH_VALUE_ORDER_THRESHOLD_GBP = 100;
 
+// ─── Auto-refund limit ────────────────────────────────────────────────────────
+// The complaint agent may autonomously issue refunds at or below this amount
+// for LOW-risk cases. Anything above must be escalated to the owner.
+
+export const AUTO_REFUND_MAX_GBP = 30;
+
 // ─── Default messages ─────────────────────────────────────────────────────────
 
 export const DEFAULT_OWNER_ESCALATION_MESSAGE =

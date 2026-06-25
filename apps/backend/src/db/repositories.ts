@@ -5,6 +5,7 @@
  * depending on whether DATA_MODE=supabase is active.
  *
  * Supabase operations use the REST API via @supabase/supabase-js.
+ * The service-role key bypasses RLS, so inserts/selects work directly.
  * Mock operations use the in-memory mockStore (resets on restart).
  */
 
@@ -18,7 +19,16 @@ export async function saveInboundMessage(msg: Record<string, unknown>): Promise<
     mockStore.messages.push({ ...msg, saved_at: new Date().toISOString() });
     return;
   }
-  const { error } = await getSupabaseClient()!.from("messages").insert(msg);
+  const row = {
+    business_id: msg.business_id,
+    customer_phone: msg.customer_phone,
+    customer_name: msg.customer_name,
+    message: msg.message,
+    image_url: msg.image_url ?? null,
+    conversation_id: msg.conversation_id,
+    received_at: msg.received_at ?? new Date().toISOString(),
+  };
+  const { error } = await getSupabaseClient()!.from("messages").insert(row);
   if (error) console.error("[Repo] saveInboundMessage:", error.message);
 }
 
@@ -33,11 +43,8 @@ export async function saveInboundMessage(msg: Record<string, unknown>): Promise<
 export async function saveDraftOrder(order: DraftOrder): Promise<void> {
   if (!isSupabaseMode()) {
     const idx = mockStore.orders.findIndex((o) => o.id === order.id);
-    if (idx >= 0) {
-      mockStore.orders[idx] = order;
-    } else {
-      mockStore.orders.push(order);
-    }
+    if (idx >= 0) mockStore.orders[idx] = order;
+    else mockStore.orders.push(order);
     return;
   }
 
@@ -80,7 +87,29 @@ export async function getOrderById(orderId: string): Promise<DraftOrder | null> 
     console.error("[Repo] getOrderById:", error.message);
     return null;
   }
-  return data as DraftOrder | null;
+  return (data as DraftOrder) ?? null;
+}
+
+export async function getLatestOrderByPhone(customerPhone: string): Promise<DraftOrder | null> {
+  if (!isSupabaseMode()) {
+    const matches = mockStore.orders
+      .filter((o) => o.customer_phone === customerPhone)
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    return matches[0] ?? null;
+  }
+
+  const { data, error } = await getSupabaseClient()!
+    .from("orders")
+    .select("*")
+    .eq("customer_phone", customerPhone)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("[Repo] getLatestOrderByPhone:", error.message);
+    return null;
+  }
+  return ((data as DraftOrder[]) ?? [])[0] ?? null;
 }
 
 export async function updateOrderStatus(
@@ -109,7 +138,26 @@ export async function saveComplaintCase(complaint: ComplaintCase): Promise<void>
     mockStore.complaints.push(complaint);
     return;
   }
-  const { error } = await getSupabaseClient()!.from("complaints").insert(complaint);
+  const row = {
+    id: complaint.id,
+    business_id: complaint.business_id,
+    customer_phone: complaint.customer_phone,
+    customer_name: complaint.customer_name,
+    issue_summary: complaint.issue_summary,
+    order_reference: complaint.order_reference,
+    urgency: complaint.urgency,
+    evidence: complaint.evidence,
+    desired_outcome: complaint.desired_outcome,
+    severity: complaint.severity,
+    safe_reply: complaint.safe_reply,
+    requires_escalation: complaint.requires_escalation,
+    risk_flags: complaint.risk_flags ?? [],
+    proposed_resolution: complaint.proposed_resolution ?? null,
+    status: complaint.status ?? "open",
+    photo_url: complaint.photo_url ?? null,
+    created_at: complaint.created_at,
+  };
+  const { error } = await getSupabaseClient()!.from("complaints").insert(row);
   if (error) console.error("[Repo] saveComplaintCase:", error.message);
 }
 
@@ -135,24 +183,70 @@ export async function getOpenOwnerTasks(businessId: string): Promise<OwnerTask[]
     .from("owner_tasks")
     .select("*")
     .eq("business_id", businessId)
-    .eq("status", "open");
+    .eq("status", "open")
+    .order("created_at", { ascending: false });
 
   if (error) {
     console.error("[Repo] getOpenOwnerTasks:", error.message);
     return [];
   }
-  return (data ?? []) as OwnerTask[];
+  return (data as OwnerTask[]) ?? [];
 }
 
-// ─── Agent logs ───────────────────────────────────────────────────────────────
+// ─── Agent logs (request-level) ───────────────────────────────────────────────
 
 export async function saveAgentLog(log: Record<string, unknown>): Promise<void> {
   if (!isSupabaseMode()) {
     mockStore.logs.push(log);
     return;
   }
-  const { error } = await getSupabaseClient()!.from("agent_logs").insert(log);
+  const row = {
+    business_id: log.business_id,
+    conversation_id: log.conversation_id,
+    customer_phone: log.customer_phone,
+    intent: log.intent ?? "unknown",
+    confidence: typeof log.confidence === "number" ? log.confidence : null,
+    router_reason: log.router_reason ?? null,
+    safety_flags: log.safety_flags ?? [],
+    agent: log.agent ?? "router",
+    duration_ms: typeof log.duration_ms === "number" ? log.duration_ms : 0,
+    success: log.success !== false,
+    error: log.error ?? null,
+  };
+  const { error } = await getSupabaseClient()!.from("agent_logs").insert(row);
   if (error) console.error("[Repo] saveAgentLog:", error.message);
+}
+
+// ─── Events (per-decision activity feed) ──────────────────────────────────────
+
+export interface EventInput {
+  agent: string;
+  kind: string;
+  summary: string;
+  level?: "info" | "warn" | "action";
+  ref?: string | null;
+  business_id?: string | null;
+  conversation_id?: string | null;
+  customer_phone?: string | null;
+}
+
+export async function saveEvent(event: EventInput): Promise<void> {
+  if (!isSupabaseMode()) {
+    mockStore.events.push({ ...event, created_at: new Date().toISOString() });
+    return;
+  }
+  const row = {
+    agent: event.agent,
+    kind: event.kind,
+    summary: event.summary,
+    level: event.level ?? "info",
+    ref: event.ref ?? null,
+    business_id: event.business_id ?? null,
+    conversation_id: event.conversation_id ?? null,
+    customer_phone: event.customer_phone ?? null,
+  };
+  const { error } = await getSupabaseClient()!.from("events").insert(row);
+  if (error) console.error("[Repo] saveEvent:", error.message);
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
@@ -168,12 +262,16 @@ export async function getDashboardSummary(businessId: string): Promise<Dashboard
     { count: totalMessages },
     { data: orders, error: ordersErr },
     { count: complaintsCount },
-    { data: openTasks, error: tasksErr },
+    { count: openTasksCount, error: tasksErr },
   ] = await Promise.all([
     client.from("messages").select("*", { count: "exact", head: true }).eq("business_id", businessId),
     client.from("orders").select("items, total_gbp").eq("business_id", businessId),
     client.from("complaints").select("*", { count: "exact", head: true }).eq("business_id", businessId),
-    client.from("owner_tasks").select("*").eq("business_id", businessId).eq("status", "open"),
+    client
+      .from("owner_tasks")
+      .select("*", { count: "exact", head: true })
+      .eq("business_id", businessId)
+      .eq("status", "open"),
   ]);
 
   if (ordersErr) console.error("[Repo] getDashboardSummary orders:", ordersErr.message);
@@ -199,7 +297,7 @@ export async function getDashboardSummary(businessId: string): Promise<Dashboard
     total_messages: totalMessages ?? 0,
     orders_drafted: (orders ?? []).length,
     complaints_received: complaintsCount ?? 0,
-    owner_tasks_open: (openTasks ?? []).length,
+    owner_tasks_open: openTasksCount ?? 0,
     top_products: topProducts,
   };
 }

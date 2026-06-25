@@ -2,7 +2,7 @@
 // Implement this interface with a real PayPal sandbox adapter when ready.
 
 import type { DraftOrder } from "@orderpilot/shared";
-import type { CheckoutResult } from "../types";
+import type { CheckoutResult, RefundResult } from "../types";
 
 export interface PaymentAdapter {
   /**
@@ -20,6 +20,12 @@ export interface PaymentAdapter {
    * Fetch the current payment status from the provider.
    */
   getPaymentStatus(orderId: string): Promise<"pending" | "completed" | "failed" | "refunded">;
+
+  /**
+   * Refund (fully or partially) a captured payment for an order.
+   * Used by the complaint agent for low-risk, within-limit refunds.
+   */
+  refund(orderId: string, amountGbp: number, reason: string): Promise<RefundResult>;
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────

@@ -1,4 +1,11 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import path from "path";
+
+// The backend runs with cwd = apps/backend, but .env lives at the monorepo root.
+// Load the root file first, then any local .env (without overriding).
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
+dotenv.config();
+
 import express from "express";
 import cors from "cors";
 

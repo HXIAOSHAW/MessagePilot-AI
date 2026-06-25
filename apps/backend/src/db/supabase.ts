@@ -18,6 +18,7 @@ export type MockStore = {
   complaints: ComplaintCase[];
   ownerTasks: OwnerTask[];
   logs: Record<string, unknown>[];
+  events: Record<string, unknown>[];
 };
 
 export const mockStore: MockStore = {
@@ -26,6 +27,7 @@ export const mockStore: MockStore = {
   complaints: [],
   ownerTasks: [],
   logs: [],
+  events: [],
 };
 
 // ─── Client singleton ─────────────────────────────────────────────────────────
@@ -52,7 +54,7 @@ export function getSupabaseClient(): SupabaseClient | null {
   }
 
   _client = createClient(url, key, {
-    auth: { persistSession: false },
+    auth: { persistSession: false, autoRefreshToken: false },
   });
 
   console.info(`[Supabase] Connected to ${url}`);

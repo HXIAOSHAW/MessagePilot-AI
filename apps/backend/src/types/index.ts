@@ -18,11 +18,23 @@ export interface CheckoutResult {
   expires_at: string;
 }
 
-export interface ManusAnalysisResult {
-  sentiment: "positive" | "neutral" | "negative" | "hostile";
-  severity_score: number; // 0–10
-  suggested_severity: "low" | "medium" | "high";
-  key_topics: string[];
-  suggested_reply: string;
-  escalate: boolean;
+export interface RefundResult {
+  refund_id: string;
+  status: string;
+  amount_gbp: number;
+}
+
+/**
+ * Structured decision returned by the Manus complaint task.
+ * Matches the `structured_output_schema` sent to Manus.
+ */
+export interface ManusComplaintDecision {
+  severity: "low" | "medium" | "high";
+  risk_flags: string[];
+  action: "auto_resolve" | "issue_refund" | "escalate";
+  refund_amount_gbp: number;
+  order_reference: string | null;
+  reply_text: string;
+  owner_summary: string;
+  reasoning: string;
 }

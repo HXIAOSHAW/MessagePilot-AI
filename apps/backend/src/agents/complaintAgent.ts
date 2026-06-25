@@ -1,168 +1,330 @@
-import { v4 as uuidv4 } from "uuid";
-import type { AgentContext, AgentResult, ComplaintCase, ComplaintSeverity } from "@orderpilot/shared";
-import { SAFETY_BLOCKED_TOPICS, DEFAULT_OWNER_ESCALATION_MESSAGE } from "@orderpilot/shared";
-import { analyseComplaint } from "../services/manusService";
-import { createOwnerTask } from "../services/ownerTaskService";
-import { saveComplaintCase } from "../db/repositories";
-import { runSafetyCheck } from "./safetyAgent";
-
 /**
- * Complaint Agent
+ * Complaint Agent — Manus-powered.
  *
- * Handles customer complaints by:
- * 1. Extracting issue, order reference, urgency, evidence, desired outcome
- * 2. Classifying severity (low / medium / high)
- * 3. Applying safety rules — NEVER auto-approves refunds, legal, health/safety
- * 4. Calling ManusService for AI analysis (mock if no API key)
- * 5. Escalating high-risk cases to owner tasks
- * 6. Returning a safe, empathetic customer reply
+ * Manus is the reasoning engine (replacing the previous Haiku/Sonnet calls): it
+ * receives the complaint + order context and returns a structured decision
+ * (severity, action, suggested reply). The backend then EXECUTES that decision
+ * through its own adapters with hard guardrails, so the model can never:
+ *   - approve a refund above the auto-refund limit,
+ *   - auto-resolve a medium/high-risk case, or
+ *   - refund an order that doesn't exist / can't be looked up.
+ *
+ * The public signature is unchanged: runComplaintAgent(ctx) -> AgentResult, so
+ * the route and the rest of the pipeline are untouched.
+ *
+ * If Manus is unavailable (no key / timeout / error), a deterministic fallback
+ * classifies severity, escalates when needed, and records the case — so the demo
+ * works against the in-memory mock store with no external calls.
  */
+
+import { v4 as uuidv4 } from "uuid";
+import type {
+  AgentContext,
+  AgentResult,
+  ComplaintCase,
+  ComplaintSeverity,
+  ComplaintStatus,
+  DraftOrder,
+  OwnerTask,
+} from "@orderpilot/shared";
+import { AUTO_REFUND_MAX_GBP, DEFAULT_OWNER_ESCALATION_MESSAGE } from "@orderpilot/shared";
+import { config } from "../config";
+import { runManusComplaint } from "../services/manusService";
+import { classifySeverity } from "../services/severityService";
+import { createOwnerTask } from "../services/ownerTaskService";
+import { getPaymentAdapter } from "../adapters/paymentAdapter";
+import { getMessagingAdapter } from "../adapters/messagingAdapter";
+import { getLatestOrderByPhone, saveComplaintCase, saveEvent } from "../db/repositories";
+import type { ManusComplaintDecision } from "../types";
+
+interface RunState {
+  recordedComplaint: ComplaintCase | null;
+  ownerTask?: OwnerTask;
+  requiresEscalation: boolean;
+  lastSeverity: ComplaintSeverity;
+  lastRiskFlags: string[];
+  lastOrder: DraftOrder | null;
+}
+
+// ─── Public entry point ───────────────────────────────────────────────────────
+
 export async function runComplaintAgent(ctx: AgentContext): Promise<AgentResult> {
-  const { message, customer_name, customer_phone, business_id, conversation_id } = ctx;
+  const state: RunState = {
+    recordedComplaint: null,
+    requiresEscalation: false,
+    lastSeverity: "low",
+    lastRiskFlags: [],
+    lastOrder: null,
+  };
 
-  // ── 1. Extract complaint details ─────────────────────────────────────────
+  await logEvent(ctx, "agent_start", `Complaint agent invoked for ${ctx.customer_phone}`);
 
-  const orderRef = extractOrderRef(message);
-  const desiredOutcome = extractDesiredOutcome(message);
-  const evidence = extractEvidence(message);
-  const urgency = extractUrgency(message);
+  // Best-effort context fetch so Manus (or the fallback) can reason about the order.
+  state.lastOrder = await safeLatestOrder(ctx.customer_phone);
 
-  // ── 2. AI analysis (Manus or mock) ───────────────────────────────────────
+  const decision = await runManusComplaint(ctx, state.lastOrder);
+  const reply = decision
+    ? await applyManusDecision(ctx, state, decision)
+    : await runDeterministicFallback(ctx, state);
 
-  const analysis = await analyseComplaint(message, `Business: ${business_id}`);
+  // Guarantee a recorded complaint so the route always gets an id.
+  if (!state.recordedComplaint) {
+    state.recordedComplaint = await persistComplaint(ctx, state, {
+      description: ctx.message,
+      severity: state.lastSeverity,
+      risk_flags: state.lastRiskFlags,
+      proposed_resolution: reply,
+      status: state.requiresEscalation ? "escalated" : "auto_resolved",
+      order_id: state.lastOrder?.id ?? null,
+      photo_url: ctx.image_url,
+    });
+  }
 
-  // ── 3. Determine severity ─────────────────────────────────────────────────
+  state.recordedComplaint.requires_escalation =
+    state.requiresEscalation || state.recordedComplaint.requires_escalation;
 
-  const severity = determineSeverity(message, analysis.suggested_severity);
+  return {
+    intent: "complaint",
+    reply,
+    complaint: state.recordedComplaint,
+    owner_task: state.ownerTask,
+    conversation_state: state.requiresEscalation ? "escalated" : "complaint",
+  };
+}
 
-  // ── 4. Safety check ───────────────────────────────────────────────────────
+// ─── Execute a Manus decision (with guardrails) ───────────────────────────────
 
-  const safetyResult = runSafetyCheck(message, analysis.suggested_reply);
-  const requiresEscalation = severity === "high" || safetyResult.blockedTopics.length > 0 || analysis.escalate;
+async function applyManusDecision(
+  ctx: AgentContext,
+  state: RunState,
+  decision: ManusComplaintDecision
+): Promise<string> {
+  state.lastSeverity = decision.severity;
+  state.lastRiskFlags = decision.risk_flags;
+  const order = state.lastOrder;
 
-  // ── 5. Build safe reply ───────────────────────────────────────────────────
+  // ── Guardrails: decide the FINAL action the backend will take ──────────────
+  let finalAction = decision.action;
 
-  const safeReply = requiresEscalation
-    ? DEFAULT_OWNER_ESCALATION_MESSAGE
-    : buildSafeReply(customer_name, severity, analysis.suggested_reply);
+  // Never auto-handle anything that isn't low risk.
+  if (decision.severity !== "low") finalAction = "escalate";
 
-  // ── 6. Create complaint case ──────────────────────────────────────────────
+  // A refund is only allowed for a real order, a positive amount, within limit.
+  if (finalAction === "issue_refund") {
+    const amount = decision.refund_amount_gbp;
+    const canRefund = Boolean(order?.id) && amount > 0 && amount <= AUTO_REFUND_MAX_GBP;
+    if (!canRefund) finalAction = "escalate";
+  }
+
+  // ── Perform the refund if still permitted ──────────────────────────────────
+  let refundIssued = false;
+  if (finalAction === "issue_refund" && order) {
+    try {
+      const refund = await getPaymentAdapter().refund(
+        order.id,
+        decision.refund_amount_gbp,
+        decision.reasoning || "Complaint resolution"
+      );
+      refundIssued = true;
+      await logEvent(
+        ctx,
+        "refund",
+        `Refund £${decision.refund_amount_gbp.toFixed(2)} (${refund.refund_id}) for order ${order.id}`,
+        null,
+        "action"
+      );
+    } catch (err) {
+      console.warn("[complaintAgent] refund failed; escalating:", (err as Error).message);
+      finalAction = "escalate";
+    }
+  }
+
+  const status: ComplaintStatus = finalAction === "escalate" ? "escalated" : "auto_resolved";
+  const proposedResolution =
+    finalAction === "escalate"
+      ? decision.owner_summary || `Escalated: ${decision.reasoning}`
+      : refundIssued
+        ? `Refund £${decision.refund_amount_gbp.toFixed(2)} issued.`
+        : decision.reply_text;
+
+  const complaint = await persistComplaint(ctx, state, {
+    description: ctx.message,
+    severity: decision.severity,
+    risk_flags: decision.risk_flags,
+    proposed_resolution: proposedResolution,
+    status,
+    order_id: order?.id ?? decision.order_reference,
+    photo_url: ctx.image_url,
+  });
+  state.recordedComplaint = complaint;
+
+  if (finalAction === "escalate") {
+    await escalateToOwner(
+      ctx,
+      state,
+      complaint.id,
+      decision.owner_summary || `[${decision.severity}] ${complaint.issue_summary}`
+    );
+    // Use a guaranteed-safe reply rather than any model text that may over-promise.
+    return DEFAULT_OWNER_ESCALATION_MESSAGE;
+  }
+
+  return decision.reply_text || buildLowRiskReply(ctx.customer_name);
+}
+
+// ─── Deterministic fallback (Manus unavailable) ───────────────────────────────
+
+async function runDeterministicFallback(ctx: AgentContext, state: RunState): Promise<string> {
+  const severityResult = await classifySeverity(ctx.message, state.lastOrder);
+  state.lastSeverity = severityResult.severity;
+  state.lastRiskFlags = severityResult.risk_flags;
+
+  const escalate = severityResult.severity !== "low";
+
+  const complaint = await persistComplaint(ctx, state, {
+    description: ctx.message,
+    severity: severityResult.severity,
+    risk_flags: severityResult.risk_flags,
+    proposed_resolution: escalate ? "Escalated to owner for review." : "Acknowledged; team to follow up.",
+    status: escalate ? "escalated" : "open",
+    order_id: state.lastOrder?.id ?? null,
+    photo_url: ctx.image_url,
+  });
+  state.recordedComplaint = complaint;
+
+  if (escalate) {
+    await escalateToOwner(ctx, state, complaint.id, `[${severityResult.severity}] ${complaint.issue_summary}`);
+    return DEFAULT_OWNER_ESCALATION_MESSAGE;
+  }
+
+  return buildLowRiskReply(ctx.customer_name);
+}
+
+// ─── Infrastructure-backed helpers ────────────────────────────────────────────
+
+interface ComplaintInput {
+  description: string;
+  severity: ComplaintSeverity;
+  risk_flags: string[];
+  proposed_resolution: string;
+  status: ComplaintStatus;
+  order_id: string | null;
+  photo_url: string | null;
+}
+
+async function persistComplaint(
+  ctx: AgentContext,
+  _state: RunState,
+  input: ComplaintInput
+): Promise<ComplaintCase> {
+  const evidence: string[] = [];
+  if (input.photo_url) evidence.push("photo_attached");
 
   const complaint: ComplaintCase = {
     id: uuidv4(),
-    business_id,
-    customer_phone,
-    customer_name,
-    issue_summary: summariseIssue(message),
-    order_reference: orderRef,
-    urgency,
+    business_id: ctx.business_id,
+    customer_phone: ctx.customer_phone,
+    customer_name: ctx.customer_name,
+    issue_summary:
+      input.description.length > 200 ? input.description.slice(0, 197) + "..." : input.description,
+    order_reference: input.order_id,
+    urgency: input.severity,
     evidence,
-    desired_outcome: desiredOutcome,
-    severity,
-    safe_reply: safeReply,
-    requires_escalation: requiresEscalation,
+    desired_outcome: input.proposed_resolution,
+    severity: input.severity,
+    safe_reply: input.proposed_resolution,
+    requires_escalation: input.status === "escalated",
+    risk_flags: input.risk_flags,
+    proposed_resolution: input.proposed_resolution,
+    status: input.status,
+    photo_url: input.photo_url,
     created_at: new Date().toISOString(),
   };
 
   await saveComplaintCase(complaint);
-
-  // ── 7. Escalate to owner if needed ────────────────────────────────────────
-
-  let ownerTask = undefined;
-
-  if (requiresEscalation) {
-    ownerTask = await createOwnerTask({
-      business_id,
-      type: "complaint_escalation",
-      title: `[${severity.toUpperCase()}] Complaint from ${customer_name}`,
-      description:
-        `Customer: ${customer_phone}\n` +
-        `Issue: ${complaint.issue_summary}\n` +
-        `Desired outcome: ${desiredOutcome}\n` +
-        `Safety flags: ${safetyResult.blockedTopics.join(", ") || "none"}\n` +
-        `Original message: "${message}"`,
-      priority: severity === "high" ? "urgent" : "high",
-      related_order_id: null,
-      related_complaint_id: complaint.id,
-    });
-  }
-
-  return {
-    intent: "complaint",
-    reply: safeReply,
-    complaint,
-    owner_task: ownerTask,
-  };
-}
-
-// ─── Extraction helpers ───────────────────────────────────────────────────────
-
-function extractOrderRef(message: string): string | null {
-  const match = message.match(/order\s*(?:number|ref|reference|#|id)?\s*[:#]?\s*([A-Z0-9-]{4,})/i);
-  return match ? match[1] : null;
-}
-
-function extractDesiredOutcome(message: string): string {
-  const lower = message.toLowerCase();
-  if (lower.includes("refund")) return "full refund";
-  if (lower.includes("replacement") || lower.includes("replace")) return "replacement";
-  if (lower.includes("compensation") || lower.includes("compensate")) return "compensation";
-  if (lower.includes("apology") || lower.includes("sorry")) return "apology";
-  return "resolution";
-}
-
-function extractEvidence(message: string): string[] {
-  const evidence: string[] = [];
-  if (/photo|picture|image|screenshot/i.test(message)) evidence.push("photo_attached");
-  if (/receipt|invoice/i.test(message)) evidence.push("receipt_mentioned");
-  if (/witness|saw|seen/i.test(message)) evidence.push("witness_mentioned");
-  return evidence;
-}
-
-function extractUrgency(message: string): "low" | "medium" | "high" {
-  const lower = message.toLowerCase();
-  const highUrgencyWords = ["urgent", "asap", "immediately", "now", "emergency", "today", "right now", "hospital", "sick", "ill", "injured"];
-  const mediumUrgencyWords = ["soon", "quickly", "as soon as possible", "this week"];
-
-  if (highUrgencyWords.some((w) => lower.includes(w))) return "high";
-  if (mediumUrgencyWords.some((w) => lower.includes(w))) return "medium";
-  return "low";
-}
-
-function determineSeverity(message: string, aiSuggested: ComplaintSeverity): ComplaintSeverity {
-  const lower = message.toLowerCase();
-
-  // Force high severity for blocked topics
-  const hasBlockedTopic = SAFETY_BLOCKED_TOPICS.some((t) => lower.includes(t));
-  if (hasBlockedTopic) return "high";
-
-  const hostileWords = ["furious", "disgusting", "never again", "sue", "legal", "solicitor", "court", "trading standards"];
-  if (hostileWords.some((w) => lower.includes(w))) return "high";
-
-  return aiSuggested;
-}
-
-function summariseIssue(message: string): string {
-  // Return first 200 chars as a clean summary
-  return message.length > 200 ? message.substring(0, 197) + "..." : message;
-}
-
-function buildSafeReply(
-  name: string,
-  severity: ComplaintSeverity,
-  aiSuggested: string
-): string {
-  if (severity === "medium") {
-    return (
-      `Hi ${name}, thank you for letting us know. We're very sorry to hear about your experience — ` +
-      `this is not the standard we hold ourselves to.\n\n` +
-      `${aiSuggested}\n\n` +
-      `We'll do our best to make this right for you.`
-    );
-  }
-
-  return (
-    `Hi ${name}, thank you for reaching out. We're sorry you've had a problem — we take all feedback seriously.\n\n` +
-    `${aiSuggested}`
+  await logEvent(
+    ctx,
+    "complaint_recorded",
+    `Complaint recorded [${input.severity}] — ${complaint.issue_summary.slice(0, 80)}`,
+    complaint.id,
+    "action"
   );
+  return complaint;
+}
+
+async function escalateToOwner(
+  ctx: AgentContext,
+  state: RunState,
+  complaintId: string,
+  reason: string
+): Promise<OwnerTask> {
+  const severity = state.lastSeverity;
+  const task = await createOwnerTask({
+    business_id: ctx.business_id,
+    type: "complaint_escalation",
+    title: `[${severity.toUpperCase()}] Complaint from ${ctx.customer_name}`,
+    description:
+      `Customer: ${ctx.customer_phone}\n` +
+      `Complaint ref: ${complaintId}\n` +
+      `Risk flags: ${state.lastRiskFlags.join(", ") || "none"}\n` +
+      `Reason: ${reason}\n` +
+      `Original message: "${ctx.message}"`,
+    priority: severity === "high" ? "urgent" : "high",
+    related_order_id: state.lastOrder?.id ?? null,
+    related_complaint_id: complaintId,
+  });
+
+  state.ownerTask = task;
+  state.requiresEscalation = true;
+
+  if (config.OWNER_WHATSAPP) {
+    getMessagingAdapter()
+      .sendMessage(
+        config.OWNER_WHATSAPP,
+        `⚠️ Complaint escalated (#${complaintId.slice(0, 8)})\n\n${reason}\n\nPlease review in the dashboard.`
+      )
+      .catch((err) => console.warn("[complaintAgent] owner escalation message failed:", err));
+  }
+
+  await logEvent(ctx, "escalation", `Escalated complaint ${complaintId.slice(0, 8)} — ${reason}`, complaintId, "warn");
+  return task;
+}
+
+async function safeLatestOrder(phone: string): Promise<DraftOrder | null> {
+  try {
+    return await getLatestOrderByPhone(phone);
+  } catch (err) {
+    console.warn("[complaintAgent] order lookup failed:", (err as Error).message);
+    return null;
+  }
+}
+
+function buildLowRiskReply(name: string): string {
+  return (
+    `Hi ${name}, thank you for reaching out and I'm sorry you've had a problem. ` +
+    `We take all feedback seriously and a member of our team will be in touch shortly to put this right for you.`
+  );
+}
+
+async function logEvent(
+  ctx: AgentContext,
+  kind: string,
+  summary: string,
+  ref: string | null = null,
+  level: "info" | "warn" | "action" = "info"
+): Promise<void> {
+  try {
+    await saveEvent({
+      agent: "complaintAgent",
+      kind,
+      summary,
+      level,
+      ref,
+      business_id: ctx.business_id,
+      conversation_id: ctx.conversation_id,
+      customer_phone: ctx.customer_phone,
+    });
+  } catch (err) {
+    console.warn("[complaintAgent] failed to write event:", err);
+  }
 }
