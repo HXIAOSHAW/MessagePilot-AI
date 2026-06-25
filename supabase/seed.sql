@@ -1,6 +1,17 @@
 -- OrderPilot AI — Seed Data
 -- Run after schema.sql to populate demo data.
 
+-- ─── Luna Bakery products ─────────────────────────────────────────────────────
+
+INSERT INTO products (id, business_id, name, price_gbp, description, available, category, lead_time_hours)
+VALUES
+  ('prod_choc_birthday_cake',    'demo_luna_bakery', 'Chocolate Birthday Cake',  29.00, 'Rich dark chocolate sponge with chocolate buttercream and ganache drip. Serves 10-12.',                    TRUE, 'celebration_cakes', 48),
+  ('prod_vanilla_birthday_cake', 'demo_luna_bakery', 'Vanilla Birthday Cake',    25.00, 'Classic vanilla sponge with vanilla buttercream and fresh berry topping. Serves 10-12.',                  TRUE, 'celebration_cakes', 48),
+  ('prod_cupcake_box',           'demo_luna_bakery', 'Cupcake Box',              18.00, 'Box of 12 assorted cupcakes — mix of chocolate, vanilla and seasonal flavours.',                          TRUE, 'cupcakes',          24),
+  ('prod_lemon_drizzle_cake',    'demo_luna_bakery', 'Lemon Drizzle Cake',       22.00, 'Zesty lemon sponge with lemon syrup glaze and candied lemon slices. Serves 8-10.',                        TRUE, 'celebration_cakes', 48),
+  ('prod_custom_wedding_tier',   'demo_luna_bakery', 'Custom Wedding Tier',     120.00, 'Two-tier wedding cake, fully customised. Consultation required. Price from £120.',                        TRUE, 'wedding_cakes',    336)
+ON CONFLICT (id) DO NOTHING;
+
 -- ─── Demo business: Luna Bakery London ───────────────────────────────────────
 
 INSERT INTO businesses (id, name, owner_name, owner_phone, email, address, currency, timezone, whatsapp_number)

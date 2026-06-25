@@ -1,11 +1,15 @@
 /**
  * Supabase client initialisation.
  *
- * If SUPABASE_URL and SUPABASE_ANON_KEY are set, a real Supabase client is
- * returned.  Otherwise, a mock client stub is returned that logs operations
- * to the console and keeps data in memory — safe for demo purposes.
+ * Active when ALL three conditions are met:
+ *   DATA_MODE=supabase
+ *   SUPABASE_URL is set
+ *   SUPABASE_SERVICE_ROLE_KEY is set
+ *
+ * Otherwise the in-memory mock store is used — safe for demo without credentials.
  */
 
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import type { DraftOrder, ComplaintCase, OwnerTask } from "@orderpilot/shared";
 
 export type MockStore = {
@@ -24,26 +28,42 @@ export const mockStore: MockStore = {
   logs: [],
 };
 
-let _supabaseClient: unknown = null;
+// ─── Client singleton ─────────────────────────────────────────────────────────
 
-export function getSupabaseClient(): unknown {
-  if (_supabaseClient) return _supabaseClient;
+let _client: SupabaseClient | null = null;
+let _initialised = false;
 
+export function getSupabaseClient(): SupabaseClient | null {
+  if (_initialised) return _client;
+  _initialised = true;
+
+  const mode = process.env.DATA_MODE;
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (url && key) {
-    // TODO: Import and initialise the real Supabase client
-    // const { createClient } = require("@supabase/supabase-js");
-    // _supabaseClient = createClient(url, key);
-    // return _supabaseClient;
-    console.warn("[Supabase] Credentials found but real client not wired — using mock store");
+  if (mode !== "supabase") {
+    console.info("[Supabase] DATA_MODE is not 'supabase' — using in-memory mock store");
+    return null;
   }
 
-  console.info("[Supabase] Running with in-memory mock store (no SUPABASE_URL set)");
-  return null;
+  if (!url || !key) {
+    console.warn("[Supabase] DATA_MODE=supabase but SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing — falling back to mock store");
+    return null;
+  }
+
+  _client = createClient(url, key, {
+    auth: { persistSession: false },
+  });
+
+  console.info(`[Supabase] Connected to ${url}`);
+  return _client;
 }
 
+export function isSupabaseMode(): boolean {
+  return getSupabaseClient() !== null;
+}
+
+/** @deprecated Use isSupabaseMode() — kept for backward compat with existing callers */
 export function isUsingMockStore(): boolean {
-  return getSupabaseClient() === null;
+  return !isSupabaseMode();
 }

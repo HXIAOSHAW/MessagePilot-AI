@@ -1,6 +1,26 @@
 -- OrderPilot AI — Supabase Schema
 -- Run this in the Supabase SQL editor to set up the database.
 
+-- ─── Products ─────────────────────────────────────────────────────────────────
+-- Queried by catalogService: GET /rest/v1/products?business_id=eq.<id>&select=*
+
+CREATE TABLE IF NOT EXISTS products (
+  id TEXT PRIMARY KEY,
+  business_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  price_gbp NUMERIC(10, 2) NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  available BOOLEAN NOT NULL DEFAULT TRUE,
+  category TEXT,
+  lead_time_hours INTEGER DEFAULT 48,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS products_business_id_idx ON products(business_id);
+
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "service_role_all" ON products FOR ALL USING (auth.role() = 'service_role');
+
 -- ─── Businesses ───────────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS businesses (
