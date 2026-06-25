@@ -48,6 +48,51 @@ export const COMPLAINT_KEYWORDS = [
   "ill",
 ];
 
+// ─── Risky signals: if any appear in an apparent order, re-route away ────────
+// These are complaint/escalation markers that must win over order signals.
+
+// Risky signals — use whole-word or phrase matching in the router.
+// Avoid short tokens that appear inside common words (e.g. "ill" in "vanilla").
+export const RISKY_ORDER_SIGNALS = [
+  "damaged",
+  "wrong item",
+  "wrong name",
+  "missing item",
+  "arrived broken",
+  "arrived damaged",
+  "not what i ordered",
+  "incorrect order",
+  "refund",
+  "compensation",
+  "really upset",
+  "very upset",
+  "very unhappy",
+  "disgusting",
+  "disgusted",
+  "furious",
+  "angry",
+  "livid",
+  "allergy",
+  "allergic",
+  "food poisoning",
+  "gone sick",       // avoid bare "sick" matching "sickness benefit" etc.
+  "made me sick",
+  "hospital",
+  "injured",
+  "legal action",
+  "solicitor",
+  "lawyer",
+  "going to court",
+  "trading standards",
+  "post a review",
+  "leave a review",
+  "social media",
+  "post about this",
+  "tell everyone",
+  "never again",
+  "waste of money",
+];
+
 export const HUMAN_HANDOVER_KEYWORDS = [
   "speak to a human",
   "speak to someone",

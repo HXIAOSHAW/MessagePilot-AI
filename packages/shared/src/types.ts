@@ -41,6 +41,28 @@ export interface AgentContext {
   catalog: Product[];
 }
 
+// ─── Extracted order slots ────────────────────────────────────────────────────
+
+export interface ExtractedOrder {
+  product_name: string | null;
+  matched_catalog_product_id: string | null;
+  quantity: number | null;
+  fulfillment_method: "pickup" | "delivery" | "unknown";
+  requested_date: string | null;
+  requested_time: string | null;
+  customer_notes: string | null;
+}
+
+export const EMPTY_EXTRACTED_ORDER: ExtractedOrder = {
+  product_name: null,
+  matched_catalog_product_id: null,
+  quantity: null,
+  fulfillment_method: "unknown",
+  requested_date: null,
+  requested_time: null,
+  customer_notes: null,
+};
+
 // ─── Agent result ─────────────────────────────────────────────────────────────
 
 export interface AgentResult {
@@ -50,6 +72,9 @@ export interface AgentResult {
   complaint?: ComplaintCase;
   owner_task?: OwnerTask;
   checkout_url?: string;
+  extracted_order?: ExtractedOrder;
+  missing_fields?: string[];
+  conversation_state?: string;
   metadata?: Record<string, unknown>;
 }
 

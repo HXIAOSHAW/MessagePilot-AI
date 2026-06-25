@@ -29,7 +29,10 @@ Returns the server status and adapter configuration.
 
 ## POST /agent/message
 
-Accepts an inbound WhatsApp message and routes it to the appropriate agent.
+Accepts an inbound WhatsApp message, routes it through the agent pipeline,
+and always returns the full standardised response shape below.
+
+Pipeline: `Router Agent → Safety Check → Order Agent / Complaint Agent → Response`
 
 ### Request body
 
@@ -46,95 +49,139 @@ Accepts an inbound WhatsApp message and routes it to the appropriate agent.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `business_id` | string | ✓ | Identifies which business this message belongs to |
-| `customer_phone` | string | ✓ | Customer's WhatsApp phone number |
+| `business_id` | string | ✓ | Business identifier — must have a catalog file |
+| `customer_phone` | string | ✓ | Customer's WhatsApp number |
 | `customer_name` | string | ✓ | Customer's display name |
 | `message` | string | ✓ | The message text |
 | `image_url` | string \| null | ✓ | Attached image URL (null if none) |
 | `conversation_id` | string | ✓ | WhatsApp conversation thread ID |
 
-### Response (order)
+### Response — always this shape
+
+Every field is always present. Missing values are `null`, `[]`, or `false`.
 
 ```json
 {
-  "success": true,
+  "reply_text": "Hi Sarah! Here's your order:\n\n• 1x Chocolate Birthday Cake — £29.00\n🏪 Pickup: Friday\n💰 Total: £29.00\n\nTap the link below to confirm and pay:\nhttps://demo.orderpilot.ai/pay/...\n\nWe'll confirm your order as soon as payment is received. 🎉",
+
   "intent": "order",
-  "reply": "Hi Sarah! Here's your order summary:\n\n• 1x Chocolate Birthday Cake — £29.00\n🏪 Pickup: Friday\n💰 Total: £29.00\n\nTo confirm and pay, tap the link below:\nhttps://demo.orderpilot.ai/pay/...\n\nYour order will be confirmed once payment is received. 🎉",
-  "order": {
-    "id": "uuid",
-    "business_id": "demo_luna_bakery",
-    "customer_phone": "+447000000000",
-    "customer_name": "Sarah",
-    "items": [
-      {
-        "product_id": "prod_choc_birthday_cake",
-        "product_name": "Chocolate Birthday Cake",
-        "quantity": 1,
-        "unit_price_gbp": 29.00,
-        "subtotal_gbp": 29.00
-      }
-    ],
-    "fulfillment": "pickup",
-    "requested_date": "Friday",
-    "notes": "",
-    "total_gbp": 29.00,
-    "status": "pending_payment",
-    "checkout_url": "https://demo.orderpilot.ai/pay/...",
-    "created_at": "2026-06-25T12:00:00.000Z"
-  },
-  "complaint": null,
-  "owner_task": null,
+  "confidence": 0.86,
+  "router_reason": "Strong order signal(s): for friday, i want to order",
+
+  "conversation_state": "awaiting_payment",
+  "requires_human": false,
+
+  "order_id": "uuid-or-null",
+  "complaint_id": null,
   "checkout_url": "https://demo.orderpilot.ai/pay/...",
-  "routing": {
-    "intent": "order",
-    "confidence": 0.8
+
+  "missing_fields": [],
+
+  "extracted_order": {
+    "product_name": "Chocolate Birthday Cake",
+    "matched_catalog_product_id": "prod_choc_birthday_cake",
+    "quantity": 1,
+    "fulfillment_method": "pickup",
+    "requested_date": "Friday",
+    "requested_time": null,
+    "customer_notes": null
   },
-  "duration_ms": 12
+
+  "safety_flags": []
 }
 ```
 
-### Response (complaint)
+### Response fields
+
+| Field | Type | Description |
+|---|---|---|
+| `reply_text` | string | Customer-facing reply — send this to WhatsApp |
+| `intent` | `order \| complaint \| product_question \| human_handover \| unknown` | Classified intent |
+| `confidence` | number (0–1) | Router confidence score |
+| `router_reason` | string | Human-readable explanation of routing decision |
+| `conversation_state` | string | See states table below |
+| `requires_human` | boolean | True when a human must follow up |
+| `order_id` | string \| null | UUID of created draft order (order intent only) |
+| `complaint_id` | string \| null | UUID of created complaint case (complaint intent only) |
+| `checkout_url` | string \| null | Mock checkout URL (set when order is complete) |
+| `missing_fields` | string[] | Required order fields not yet provided |
+| `extracted_order` | object | All extracted order slots (nulls for missing) |
+| `safety_flags` | string[] | Risky signals detected in the message |
+
+### `conversation_state` values
+
+| State | Meaning |
+|---|---|
+| `awaiting_payment` | Order complete — checkout URL returned |
+| `awaiting_info` | Order intent but required fields missing — follow-up question sent |
+| `complaint` | Message routed to Complaint Agent |
+| `human_handover` | Human must take over |
+| `product_question` | Price / availability question answered |
+| `awaiting_clarification` | Ambiguous message — clarification question sent |
+| `error` | Agent error (retry safe) |
+
+### `missing_fields` values
+
+Only populated when `intent = order` and `conversation_state = awaiting_info`.
+
+| Value | Meaning |
+|---|---|
+| `product_name` | No product matched in catalog |
+| `requested_date` | No date/day provided |
+| `fulfillment_method` | Pickup or delivery not specified |
+| `quantity` | Number of items unclear |
+
+### `extracted_order` schema
+
+Always returned (all nulls if intent is not order).
 
 ```json
 {
-  "success": true,
-  "intent": "complaint",
-  "reply": "Our team has received your message and a member of staff will be in touch shortly...",
-  "order": null,
-  "complaint": {
-    "id": "uuid",
-    "business_id": "demo_luna_bakery",
-    "customer_phone": "+447111111111",
-    "customer_name": "James",
-    "issue_summary": "Customer is furious, demanding full refund...",
-    "order_reference": null,
-    "urgency": "high",
-    "evidence": [],
-    "desired_outcome": "full refund",
-    "severity": "high",
-    "safe_reply": "Our team has received your message...",
-    "requires_escalation": true,
-    "created_at": "2026-06-25T12:00:00.000Z"
-  },
-  "owner_task": {
-    "id": "uuid",
-    "business_id": "demo_luna_bakery",
-    "type": "complaint_escalation",
-    "title": "[HIGH] Complaint from James",
-    "description": "...",
-    "priority": "urgent",
-    "related_order_id": null,
-    "related_complaint_id": "uuid",
-    "status": "open",
-    "created_at": "2026-06-25T12:00:00.000Z"
-  },
-  "checkout_url": null,
-  "routing": { "intent": "complaint", "confidence": 0.75 },
-  "duration_ms": 28
+  "product_name": "string | null",
+  "matched_catalog_product_id": "string | null",
+  "quantity": "number | null",
+  "fulfillment_method": "pickup | delivery | unknown",
+  "requested_date": "string | null",
+  "requested_time": "string | null",
+  "customer_notes": "string | null"
 }
 ```
 
-### Error responses
+### What teammates can rely on
+
+- `reply_text` is always a safe, customer-facing string — send it directly to WhatsApp
+- `checkout_url` is non-null **only** when all required order fields were extracted and a checkout was created
+- `missing_fields` is `[]` when an order is complete or when intent is not order
+- `safety_flags` is `[]` for clean messages; non-empty means a risky signal was detected
+- `requires_human` is always `true` for `human_handover` intent and for high-severity complaints
+- The response shape never changes — all fields are always present
+
+### What remains mocked
+
+| Field | Mock behaviour | Real integration |
+|---|---|---|
+| `checkout_url` | `https://demo.orderpilot.ai/pay/...` format | PayPal sandbox → `paypalAdapter.stub.ts` |
+| WhatsApp delivery | Logs to console | Wassist → `wassistAdapter.stub.ts` |
+| `complaint_id` escalation | In-memory store | Supabase → set `SUPABASE_URL` in `.env` |
+
+### Canonical test cases
+
+Run all 7 with:
+```bash
+bash scripts/demo_agent_core.sh
+```
+
+| # | Message | Expected intent | Expected state |
+|---|---|---|---|
+| 1 | "I want to order a chocolate birthday cake for Friday pickup" | `order` | `awaiting_payment` |
+| 2 | "I want a chocolate cake" | `order` | `awaiting_info` |
+| 3 | "Can I get two cupcake boxes delivered tomorrow?" | `order` | `awaiting_payment` |
+| 4 | "How much is the vanilla cake?" | `product_question` | `product_question` |
+| 5 | "My chocolate cake arrived damaged and I want a refund" | `complaint` | `complaint` |
+| 6 | "My cake has the wrong name and I am really upset" | `complaint` | `complaint` |
+| 7 | "Can you help me with a cake?" | `unknown` | `awaiting_clarification` |
+
+### Error response
 
 ```json
 { "error": "Invalid request", "details": { "fieldErrors": { "business_id": ["Required"] } } }
