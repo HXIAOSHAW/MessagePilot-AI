@@ -136,18 +136,40 @@ What to show:
 ## Run all automated tests (30s)
 
 ```bash
+# All 7 canonical agent core tests (mock mode, no credentials)
 bash scripts/demo_agent_core.sh
+
+# Manus contract test — proves MANUS_MODE=mock works end-to-end
+bash scripts/demo_manus_contract_mock.sh
 ```
 
-Runs all 7 canonical test cases with pass/fail assertions.
+### Optional: Supabase demo (requires credentials)
+
+```bash
+# Verify products are seeded in Supabase
+SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... bash scripts/check_supabase_products.sh
+
+# Full order flow with Supabase data-source assertions
+DATA_MODE=supabase SUPABASE_STRICT=true \
+  SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... \
+  bash scripts/demo_supabase_order_flow.sh
+```
+
+Response fields to point out in Supabase mode:
+- `data_mode: "supabase"` — confirms Supabase is active
+- `product_lookup_source: "supabase"` — products came from Supabase
+- `fallback_used: false` — no silent fallback to local JSON
+- `supabase_order_created: true` — draft order was persisted to Supabase
 
 ---
 
 ## What's next — integration hand-offs
 
-| Integration | File | Env vars needed |
+| Integration | Contract file | Env vars needed |
 |---|---|---|
-| Wassist (real WhatsApp) | `apps/backend/src/adapters/wassistAdapter.stub.ts` | `WASSIST_API_KEY` |
-| PayPal Sandbox (real checkout) | `apps/backend/src/adapters/paypalAdapter.stub.ts` | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` |
-| Manus AI (real reasoning) | `apps/backend/src/services/manusService.ts` | `MANUS_API_KEY` |
-| Supabase (persistent memory) | `supabase/schema.sql` then `.env` | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
+| **Wassist** (real WhatsApp) | `apps/backend/src/adapters/wassistAdapter.stub.ts` | `WASSIST_API_KEY` |
+| **PayPal Sandbox** (real checkout) | `apps/backend/src/adapters/paypalAdapter.stub.ts` | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` |
+| **Manus AI** (teammate reasoning service) | `apps/backend/src/adapters/manusAdapter.ts` | `MANUS_MODE=external`, `MANUS_ENDPOINT`, `MANUS_API_KEY` |
+| **Supabase** (persistent memory) | `supabase/schema.sql` → seed → `.env` | `DATA_MODE=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` |
+
+**Key architecture rule:** Backend Safety Agent always has final authority, even when external Manus is used.

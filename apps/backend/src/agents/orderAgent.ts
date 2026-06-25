@@ -107,7 +107,7 @@ export async function runOrderAgent(ctx: AgentContext): Promise<AgentResult> {
   order.checkout_url = checkout.checkout_url;
   order.status = "pending_payment";
 
-  await saveDraftOrder(order);
+  const supabaseOrderCreated = await saveDraftOrder(order);
 
   const reply = buildConfirmationReply(customer_name, order, checkout.checkout_url);
 
@@ -119,6 +119,7 @@ export async function runOrderAgent(ctx: AgentContext): Promise<AgentResult> {
     extracted_order: extracted,
     missing_fields: [],
     conversation_state: "awaiting_payment",
+    metadata: { supabase_order_created: supabaseOrderCreated },
   };
 }
 

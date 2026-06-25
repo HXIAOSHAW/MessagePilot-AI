@@ -1,4 +1,7 @@
-import "dotenv/config";
+import path from "path";
+import dotenv from "dotenv";
+// Load .env from monorepo root (apps/backend/src → ../../../)
+dotenv.config({ path: path.resolve(__dirname, "../../../.env") });
 import express from "express";
 import cors from "cors";
 
@@ -44,12 +47,18 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
+  const manusMode = process.env.MANUS_MODE === "external" && process.env.MANUS_API_KEY
+    ? "external (Manus AI) "
+    : "mock (router agent) ";
+  const storageMode = process.env.DATA_MODE === "supabase" && process.env.SUPABASE_URL
+    ? "Supabase        "
+    : "in-memory mock  ";
   console.log(`
 ╔════════════════════════════════════════════╗
 ║   MessagePilot AI Backend                  ║
 ║   Running on http://localhost:${PORT}         ║
-║   Storage: ${process.env.SUPABASE_URL ? "Supabase        " : "in-memory mock   "}          ║
-║   Manus:   ${process.env.MANUS_API_KEY  ? "connected      " : "mock (no key)    "}          ║
+║   Storage: ${storageMode}        ║
+║   Manus:   ${manusMode}   ║
 ╚════════════════════════════════════════════╝
   `);
 });

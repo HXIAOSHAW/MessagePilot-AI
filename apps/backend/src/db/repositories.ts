@@ -29,8 +29,11 @@ export async function saveInboundMessage(msg: Record<string, unknown>): Promise<
  *
  * Supabase: POST /rest/v1/orders  (Prefer: return=representation)
  * Mock:     upsert into in-memory store
+ *
+ * Returns true if saved to Supabase, false otherwise (mock or error).
+ * The caller should include this in the response as `supabase_order_created`.
  */
-export async function saveDraftOrder(order: DraftOrder): Promise<void> {
+export async function saveDraftOrder(order: DraftOrder): Promise<boolean> {
   if (!isSupabaseMode()) {
     const idx = mockStore.orders.findIndex((o) => o.id === order.id);
     if (idx >= 0) {
@@ -38,16 +41,15 @@ export async function saveDraftOrder(order: DraftOrder): Promise<void> {
     } else {
       mockStore.orders.push(order);
     }
-    return;
+    return false; // in-memory, not Supabase
   }
 
-  // Map DraftOrder → Supabase row (snake_case, JSONB for items)
   const row = {
     id: order.id,
     business_id: order.business_id,
     customer_phone: order.customer_phone,
     customer_name: order.customer_name,
-    items: order.items,                     // stored as JSONB
+    items: order.items,
     fulfillment: order.fulfillment,
     requested_date: order.requested_date,
     notes: order.notes,
@@ -61,8 +63,13 @@ export async function saveDraftOrder(order: DraftOrder): Promise<void> {
     .from("orders")
     .upsert(row, { onConflict: "id" });
 
-  if (error) console.error("[Repo] saveDraftOrder:", error.message);
-  else console.info(`[Repo] Order ${order.id} saved to Supabase`);
+  if (error) {
+    console.error("[Repo] saveDraftOrder:", error.message);
+    return false;
+  }
+
+  console.info(`[Repo] Order ${order.id} saved to Supabase`);
+  return true;
 }
 
 export async function getOrderById(orderId: string): Promise<DraftOrder | null> {

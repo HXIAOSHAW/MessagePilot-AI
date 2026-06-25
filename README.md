@@ -96,10 +96,44 @@ Leave all credentials blank. The backend runs entirely in **mock mode** — no e
 
 | Blank env var | What runs instead |
 |---|---|
-| `MANUS_API_KEY` | Mock keyword-based reasoning |
+| `MANUS_MODE=mock` (default) | Local Router Agent handles intent (no credentials) |
 | `WASSIST_API_KEY` | Console-logged replies |
 | `PAYPAL_CLIENT_ID` | Mock checkout URL |
-| `SUPABASE_URL` | In-memory store (resets on restart) |
+| `DATA_MODE` not set | In-memory store (resets on restart) |
+
+### Supabase data mode
+
+To use real Supabase for product lookup and order persistence:
+
+```bash
+DATA_MODE=supabase
+SUPABASE_URL=https://oamnvukqwqtqvmbqivhm.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
+```
+
+To verify the Supabase dataset is in place before a demo:
+
+```bash
+# Check products exist in Supabase
+bash scripts/check_supabase_products.sh
+
+# Run full order flow and assert Supabase fields
+DATA_MODE=supabase SUPABASE_STRICT=true bash scripts/demo_supabase_order_flow.sh
+```
+
+`SUPABASE_STRICT=true` prevents silent fallback to local JSON — fails clearly if products are missing.
+
+### Manus teammate mode
+
+Teammate Manus service endpoint contract: `apps/backend/src/adapters/manusAdapter.ts`
+
+```bash
+MANUS_MODE=external
+MANUS_ENDPOINT=https://<teammate-manus-url>
+MANUS_API_KEY=<optional>
+```
+
+In external mode, if Manus fails, the backend automatically falls back to the local Router Agent and sets `manus_fallback=true` in the response. The Backend Safety Agent always runs regardless.
 
 ---
 
@@ -131,6 +165,20 @@ bash scripts/demo_complaint_flow.sh
 **Full agent core demo** — all 7 canonical test cases:
 ```bash
 bash scripts/demo_agent_core.sh
+```
+
+**Manus contract mock test** — prove mock mode works end to end:
+```bash
+bash scripts/demo_manus_contract_mock.sh
+```
+
+**Supabase order demo** — with data-source visibility assertions:
+```bash
+# Mock mode (no credentials needed)
+bash scripts/demo_supabase_order_flow.sh
+
+# Supabase mode (requires credentials)
+DATA_MODE=supabase SUPABASE_STRICT=true bash scripts/demo_supabase_order_flow.sh
 ```
 
 Or manually:
@@ -199,15 +247,17 @@ messagepilot-ai/
 2. Implement the `PaymentAdapter` interface
 3. Set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` in `.env`
 
-### Connect Manus AI
-1. Open `apps/backend/src/services/manusService.ts`
-2. Implement `callManusApi()`
-3. Set `MANUS_API_KEY` in `.env` — the service switches automatically
+### Connect Manus AI (teammate)
+1. Build a service that accepts `POST /analyse` with `{ message, business_id, customer_name }`
+2. Return the `ManusDecision` shape defined in `apps/backend/src/adapters/manusAdapter.ts`
+3. Set in `.env`: `MANUS_MODE=external`, `MANUS_ENDPOINT=<your-url>`, `MANUS_API_KEY=<optional>`
+4. Backend Safety Agent always runs after Manus and has final authority
 
 ### Connect Supabase
 1. Run `supabase/schema.sql` in your Supabase project
-2. Run `supabase/seed.sql` for demo data
-3. Set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` in `.env`
+2. Run `supabase/seed.sql` for demo data (Luna Bakery products)
+3. Set in `.env`: `DATA_MODE=supabase`, `SUPABASE_URL=...`, `SUPABASE_SERVICE_ROLE_KEY=...`
+4. Verify: `bash scripts/check_supabase_products.sh`
 
 ---
 

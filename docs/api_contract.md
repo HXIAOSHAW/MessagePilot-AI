@@ -14,6 +14,22 @@ Teammates only need three endpoints:
 
 ---
 
+## Environment configuration
+
+| Variable | Values | Effect |
+|---|---|---|
+| `DATA_MODE` | `supabase` / (blank) | Blank = in-memory mock. `supabase` = Supabase for products + orders. |
+| `SUPABASE_STRICT` | `true` / `false` | `true` = fail hard when Supabase products empty (no silent fallback). |
+| `MANUS_MODE` | `mock` / `external` | `mock` = local Router Agent. `external` = call teammate Manus service. |
+| `MANUS_ENDPOINT` | URL | Required when `MANUS_MODE=external`. |
+| `MANUS_API_KEY` | string | Optional auth for external Manus. |
+
+**Teammate Manus contract:** `apps/backend/src/adapters/manusAdapter.ts`  
+**Teammate Wassist integration:** `apps/backend/src/adapters/wassistAdapter.stub.ts`  
+**Teammate PayPal integration:** `apps/backend/src/adapters/paypalAdapter.stub.ts`
+
+---
+
 ## GET /health
 
 Returns the server status and adapter configuration.
@@ -97,7 +113,15 @@ Every field is always present. Missing values are `null`, `[]`, or `false`.
     "customer_notes": null
   },
 
-  "safety_flags": []
+  "safety_flags": [],
+
+  "data_mode": "memory",
+  "product_lookup_source": "memory",
+  "fallback_used": false,
+  "supabase_order_created": false,
+
+  "manus_used": false,
+  "manus_fallback": false
 }
 ```
 
@@ -117,6 +141,12 @@ Every field is always present. Missing values are `null`, `[]`, or `false`.
 | `missing_fields` | string[] | Required order fields not yet provided |
 | `extracted_order` | object | All extracted order slots (nulls for missing) |
 | `safety_flags` | string[] | Risky signals detected in the message |
+| `data_mode` | `memory \| supabase` | Active data mode for this request |
+| `product_lookup_source` | `memory \| supabase \| fallback` | Where products were loaded from |
+| `fallback_used` | boolean | `true` when Supabase was attempted but local JSON was used |
+| `supabase_order_created` | boolean | `true` when the draft order was written to Supabase |
+| `manus_used` | boolean | `true` when external Manus was called for this request |
+| `manus_fallback` | boolean | `true` when Manus failed and local Router Agent was used instead |
 
 ### `conversation_state` values
 

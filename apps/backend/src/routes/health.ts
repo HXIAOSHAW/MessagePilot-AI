@@ -13,7 +13,7 @@ router.get("/", (_req, res) => {
     adapters: {
       messaging: process.env.WASSIST_API_KEY ? "wassist (stub)" : "mock",
       payment: process.env.PAYPAL_CLIENT_ID ? "paypal (stub)" : "mock",
-      manus: process.env.MANUS_API_KEY ? "real" : "mock",
+      manus: process.env.MANUS_MODE === "external" && process.env.MANUS_API_KEY ? "external (Manus AI)" : "mock",
     },
   });
 });

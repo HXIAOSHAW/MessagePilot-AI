@@ -7,7 +7,9 @@ import { runComplaintAgent } from "../agents/complaintAgent";
 import { checkOrderSafety } from "../agents/safetyAgent";
 import { getCatalog } from "../services/catalogService";
 import { getMessagingAdapter } from "../adapters/messagingAdapter";
+import { getManusAdapter } from "../services/manusService";
 import { saveInboundMessage, saveAgentLog } from "../db/repositories";
+import { isSupabaseMode } from "../db/supabase";
 import type { AgentContext, ExtractedOrder } from "@orderpilot/shared";
 
 const router = Router();
@@ -18,15 +20,15 @@ const router = Router();
  * Pipeline:
  *   1. Validate input (Zod)
  *   2. Save inbound message
- *   3. Router Agent → intent, confidence, reason
- *   4. Safety check (order path only)
+ *   3. Route intent — Router Agent (or external Manus if MANUS_MODE=external)
+ *   4. Safety check (order path only) — always runs, has final authority
  *   5. Dispatch to Order Agent or Complaint Agent
- *   6. Assemble standard response
+ *   6. Assemble standard response (includes data-source visibility fields)
  *   7. Send reply via Messaging Adapter (non-blocking)
  *   8. Log
  *
- * Always returns the full response shape defined in docs/api_contract.md —
- * every field is present, missing values are null / [] / false.
+ * Always returns the full response shape defined in docs/api_contract.md.
+ * Every field is present; missing values are null / [] / false.
  */
 router.post("/message", async (req: Request, res: Response) => {
   const startTime = Date.now();
@@ -45,24 +47,65 @@ router.post("/message", async (req: Request, res: Response) => {
   // ── 2. Save inbound message ───────────────────────────────────────────────
   await saveInboundMessage({ ...input, received_at: new Date().toISOString() });
 
-  // ── 3. Route intent ───────────────────────────────────────────────────────
-  const routing = routeMessage(input.message);
-  console.log(
-    `[Agent] ${input.conversation_id} → ${routing.intent} (${routing.confidence}) — ${routing.reason}`
-  );
+  // ── 3. Load catalog — capture source metadata ─────────────────────────────
+  let catalogResult: Awaited<ReturnType<typeof getCatalog>>;
+  try {
+    catalogResult = await getCatalog(input.business_id);
+  } catch (err: any) {
+    // SUPABASE_STRICT=true + products unavailable → return structured failure
+    console.error("[Agent] Catalog load failed (strict mode):", err.message);
+    return res.status(503).json({
+      error: "catalog_unavailable",
+      message: err.message,
+      data_mode: "supabase",
+      product_lookup_source: "supabase",
+      fallback_used: false,
+      supabase_order_created: false,
+    });
+  }
 
-  // ── 4. Load catalog ───────────────────────────────────────────────────────
-  const catalog = await getCatalog(input.business_id);
-
+  const { products: catalog, source: catalogSource, fallback_used } = catalogResult;
   const ctx: AgentContext = { ...input, catalog };
 
+  // ── 4. Route intent — Manus or local Router Agent ─────────────────────────
+  const manusAdapter = getManusAdapter();
+  let manusUsed = false;
+  let manusFallback = false;
+  let routing = routeMessage(input.message); // default local
+
+  if (manusAdapter) {
+    try {
+      const manusResult = await manusAdapter.analyseMessage(input.message, {
+        catalog,
+        business_id: input.business_id,
+        customer_name: input.customer_name,
+      });
+      routing = {
+        intent: manusResult.intent,
+        confidence: manusResult.confidence,
+        reason: manusResult.reason ?? "manus-external",
+      };
+      manusUsed = true;
+      console.log(
+        `[Agent] Manus intent: ${routing.intent} (${routing.confidence}) — ${routing.reason}`
+      );
+    } catch (err: any) {
+      console.warn("[Agent] External Manus failed, using Router Agent fallback:", err.message);
+      routing = routeMessage(input.message);
+      manusUsed = false;
+      manusFallback = true;
+    }
+  } else {
+    console.log(
+      `[Agent] Router ${input.conversation_id} → ${routing.intent} (${routing.confidence}) — ${routing.reason}`
+    );
+  }
+
   // ── 5. Safety pre-check for order path ───────────────────────────────────
-  //    Run this before dispatching so a risky message cannot slip through
-  //    even if the router classified it as an order.
+  //    Runs regardless of Manus result — Safety Agent has final authority.
   const orderSafety = checkOrderSafety(input.message);
 
   if (!orderSafety.safe && routing.intent === "order") {
-    // Safety overrides the router — treat as complaint/human_handover
     const overrideIntent = orderSafety.requires_human ? "human_handover" : "complaint";
     console.warn(
       `[Agent] Safety override: ${routing.intent} → ${overrideIntent} (flags: ${orderSafety.safety_flags.join(", ")})`
@@ -80,6 +123,7 @@ router.post("/message", async (req: Request, res: Response) => {
   let missingFields: string[] = [];
   let extractedOrder: ExtractedOrder = { ...EMPTY_EXTRACTED_ORDER };
   let requiresHuman = orderSafety.requires_human;
+  let supabaseOrderCreated = false;
 
   try {
     if (routing.intent === "order") {
@@ -90,6 +134,7 @@ router.post("/message", async (req: Request, res: Response) => {
       checkoutUrl = result.checkout_url ?? null;
       missingFields = result.missing_fields ?? [];
       extractedOrder = result.extracted_order ?? { ...EMPTY_EXTRACTED_ORDER };
+      supabaseOrderCreated = (result.metadata?.supabase_order_created as boolean) ?? false;
 
     } else if (routing.intent === "complaint") {
       const result = await runComplaintAgent(ctx);
@@ -109,7 +154,6 @@ router.post("/message", async (req: Request, res: Response) => {
       conversationState = "product_question";
 
     } else {
-      // unknown — ambiguous message
       replyText = buildClarificationReply(input.customer_name);
       conversationState = "awaiting_clarification";
     }
@@ -147,6 +191,7 @@ router.post("/message", async (req: Request, res: Response) => {
 
   // ── 9. Standard response ──────────────────────────────────────────────────
   return res.json({
+    // Core agent output (unchanged fields)
     reply_text: replyText,
     intent: routing.intent,
     confidence: routing.confidence,
@@ -159,6 +204,14 @@ router.post("/message", async (req: Request, res: Response) => {
     missing_fields: missingFields,
     extracted_order: extractedOrder,
     safety_flags: orderSafety.safety_flags,
+    // Data-source visibility fields (new)
+    data_mode: isSupabaseMode() ? "supabase" : "memory",
+    product_lookup_source: catalogSource,
+    fallback_used: fallback_used,
+    supabase_order_created: supabaseOrderCreated,
+    // Manus fields (new)
+    manus_used: manusUsed,
+    manus_fallback: manusFallback,
   });
 });
 
