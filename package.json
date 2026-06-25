@@ -1,0 +1,21 @@
+{
+  "name": "orderpilot-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-running WhatsApp operations agent for small WooCommerce businesses",
+  "scripts": {
+    "dev:backend": "pnpm --filter backend dev",
+    "build:backend": "pnpm --filter backend build",
+    "dev:web": "pnpm --filter web dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=8"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "om_001",
+    "description": "Simple birthday cake order with date",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447000000001",
+    "customer_name": "Sarah",
+    "message": "Hi! I want to order a chocolate birthday cake for Friday pickup please",
+    "image_url": null,
+    "conversation_id": "wa_conv_om_001",
+    "expected_intent": "order",
+    "expected_product": "Chocolate Birthday Cake"
+  },
+  {
+    "id": "om_002",
+    "description": "Cupcake box order with specific date",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447000000002",
+    "customer_name": "James",
+    "message": "Can I get a cupcake box for Saturday? It's for my mum's birthday",
+    "image_url": null,
+    "conversation_id": "wa_conv_om_002",
+    "expected_intent": "order",
+    "expected_product": "Cupcake Box"
+  },
+  {
+    "id": "om_003",
+    "description": "Order with inscription request",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447000000003",
+    "customer_name": "Priya",
+    "message": "I'd like a vanilla birthday cake for Thursday. Can you write 'Happy 30th Emma!' on it?",
+    "image_url": null,
+    "conversation_id": "wa_conv_om_003",
+    "expected_intent": "order",
+    "expected_product": "Vanilla Birthday Cake"
+  },
+  {
+    "id": "om_004",
+    "description": "Incomplete order — no date provided",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447000000004",
+    "customer_name": "Tom",
+    "message": "I want to order a chocolate cake",
+    "image_url": null,
+    "conversation_id": "wa_conv_om_004",
+    "expected_intent": "order",
+    "expected_behaviour": "should ask for date"
+  },
+  {
+    "id": "om_005",
+    "description": "Product not in catalog",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447000000005",
+    "customer_name": "Lisa",
+    "message": "Do you have any strawberry tarts?",
+    "image_url": null,
+    "conversation_id": "wa_conv_om_005",
+    "expected_intent": "order",
+    "expected_behaviour": "should show menu"
+  }
+]

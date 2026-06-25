@@ -1,0 +1,52 @@
+[
+  {
+    "id": "prod_choc_birthday_cake",
+    "name": "Chocolate Birthday Cake",
+    "price_gbp": 29.00,
+    "description": "Rich dark chocolate sponge with chocolate buttercream and ganache drip. Serves 10-12.",
+    "available": true,
+    "category": "celebration_cakes",
+    "lead_time_hours": 48,
+    "customisation_options": ["message_inscription", "colour_scheme", "number_candles"]
+  },
+  {
+    "id": "prod_vanilla_birthday_cake",
+    "name": "Vanilla Birthday Cake",
+    "price_gbp": 25.00,
+    "description": "Classic vanilla sponge with vanilla buttercream and fresh berry topping. Serves 10-12.",
+    "available": true,
+    "category": "celebration_cakes",
+    "lead_time_hours": 48,
+    "customisation_options": ["message_inscription", "colour_scheme", "number_candles"]
+  },
+  {
+    "id": "prod_cupcake_box",
+    "name": "Cupcake Box",
+    "price_gbp": 18.00,
+    "description": "Box of 12 assorted cupcakes — mix of chocolate, vanilla and seasonal flavours.",
+    "available": true,
+    "category": "cupcakes",
+    "lead_time_hours": 24,
+    "customisation_options": ["flavour_selection", "message_toppers"]
+  },
+  {
+    "id": "prod_lemon_drizzle_cake",
+    "name": "Lemon Drizzle Cake",
+    "price_gbp": 22.00,
+    "description": "Zesty lemon sponge with lemon syrup glaze and candied lemon slices. Serves 8-10.",
+    "available": true,
+    "category": "celebration_cakes",
+    "lead_time_hours": 48,
+    "customisation_options": ["message_inscription"]
+  },
+  {
+    "id": "prod_custom_wedding_tier",
+    "name": "Custom Wedding Tier",
+    "price_gbp": 120.00,
+    "description": "Two-tier wedding cake, fully customised. Consultation required. Price from £120.",
+    "available": true,
+    "category": "wedding_cakes",
+    "lead_time_hours": 336,
+    "customisation_options": ["design_consultation", "flavour_selection", "decoration"]
+  }
+]

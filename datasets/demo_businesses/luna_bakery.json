@@ -1,0 +1,25 @@
+{
+  "id": "demo_luna_bakery",
+  "name": "Luna Bakery London",
+  "owner_name": "Luna Chen",
+  "owner_phone": "+447900000001",
+  "email": "hello@lunabakery.co.uk",
+  "address": "42 Flower Street, Hackney, London E8 3AA",
+  "currency": "GBP",
+  "timezone": "Europe/London",
+  "whatsapp_number": "+447900000002",
+  "description": "Award-winning artisan bakery in Hackney specialising in custom celebration cakes, cupcakes and pastries.",
+  "operating_hours": {
+    "monday": "09:00-17:00",
+    "tuesday": "09:00-17:00",
+    "wednesday": "09:00-17:00",
+    "thursday": "09:00-17:00",
+    "friday": "09:00-18:00",
+    "saturday": "09:00-18:00",
+    "sunday": "closed"
+  },
+  "fulfillment_options": ["pickup", "local_delivery"],
+  "delivery_radius_miles": 5,
+  "minimum_order_notice_hours": 48,
+  "created_at": "2024-01-01T00:00:00Z"
+}

@@ -1,0 +1,58 @@
+[
+  {
+    "id": "mm_001",
+    "description": "Product question — pricing",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447222000001",
+    "customer_name": "Sophie",
+    "message": "Hi, how much is a birthday cake?",
+    "image_url": null,
+    "conversation_id": "wa_conv_mm_001",
+    "expected_intent": "product_question"
+  },
+  {
+    "id": "mm_002",
+    "description": "Human handover request",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447222000002",
+    "customer_name": "David",
+    "message": "I need to speak to a real person please",
+    "image_url": null,
+    "conversation_id": "wa_conv_mm_002",
+    "expected_intent": "human_handover"
+  },
+  {
+    "id": "mm_003",
+    "description": "Unknown message",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447222000003",
+    "customer_name": "Unknown",
+    "message": "👋",
+    "image_url": null,
+    "conversation_id": "wa_conv_mm_003",
+    "expected_intent": "unknown"
+  },
+  {
+    "id": "mm_004",
+    "description": "Availability question",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447222000004",
+    "customer_name": "Chloe",
+    "message": "Do you have gluten free cakes available?",
+    "image_url": null,
+    "conversation_id": "wa_conv_mm_004",
+    "expected_intent": "product_question"
+  },
+  {
+    "id": "mm_005",
+    "description": "Order + complaint combined — complaint should win",
+    "business_id": "demo_luna_bakery",
+    "customer_phone": "+447222000005",
+    "customer_name": "Oliver",
+    "message": "I want to order again but my last cake was completely wrong and I'm very unhappy with it",
+    "image_url": null,
+    "conversation_id": "wa_conv_mm_005",
+    "expected_intent": "complaint",
+    "notes": "Mixed signal: complaint should override order intent"
+  }
+]
